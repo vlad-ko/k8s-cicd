@@ -308,6 +308,71 @@ This is the third org-level policy to shape the architecture, after the external
 in §1. A recurring lesson: **check effective org policy before choosing an approach, not
 after the error message.**
 
+### Finding 5 — registry token scopes, and a verification script that lied
+
+Before wiring any Harness connector, I tested the registry directly: push with credentials,
+then pull *without* them. The push failed:
+
+```
+authentication required - access token has insufficient scopes
+```
+
+**Distinguishing the two candidate causes.** "Insufficient scopes" could mean the repository
+was private, or the token lacked write permission. These have completely different fixes, so
+I checked both independently rather than guessing:
+
+```
+# Is the repo private?  -> No.
+$ curl -s https://hub.docker.com/v2/repositories/<REGISTRY_USER>/harness-lab-app/
+  is_private : False
+
+# Will the auth service issue a push-scoped token?  -> No.
+$ curl -H "Authorization: Basic <creds>" \
+    "https://auth.docker.io/token?service=registry.docker.io&scope=repository:<...>:pull,push"
+  HTTP 401 Unauthorized
+```
+
+Public repo, refused push token — so unambiguously a token-scope problem. Docker Hub's
+newer PAT UI both defaults to read-only and allows scoping a token to specific
+repositories, so a token generated before the repository exists will not cover it even at
+the right permission level. Regenerating with **Read & Write** resolved it.
+
+**Verified after the fix**, using an anonymous token — the same path a cluster node takes,
+with no credentials at all:
+
+```
+$ curl -H "Authorization: Bearer <anonymous-token>" \
+    https://registry-1.docker.io/v2/<REGISTRY_USER>/harness-lab-app/manifests/registry-smoke
+  HTTP 200            # publicly pullable -> no imagePullSecret required
+  arch: ['amd64']     # matches the GKE nodes
+```
+
+**Why pre-check at all.** Wiring Harness first would have surfaced this as a failed CI stage
+several minutes into a pipeline run, with a registry error that reads like a Harness
+misconfiguration. Testing the dependency directly cost about a minute and pointed at exactly
+one setting. Same principle as the egress pre-check in §1: **verify each external dependency
+in isolation before composing them**, because a failure inside an orchestrator is always
+harder to attribute than the same failure standing alone.
+
+**The more uncomfortable lesson.** My verification script reported success on a push that had
+actually failed — twice, for two different reasons:
+
+1. `docker push -q ... | tail -3` — the pipe returned `tail`'s exit status, so the failure
+   was invisible and `set -e` never fired.
+2. The rewrite used `${PIPESTATUS[0]}`, which is a **bash** array. This shell is **zsh**,
+   where it is `pipestatus`; the variable expanded empty and the guard evaluated on an empty
+   string.
+
+Both times the script printed a confident checkmark over a failed operation. The push was
+only caught because the raw output was also visible.
+
+A verification that cannot fail is worse than no verification, because it manufactures
+false confidence. Two rules taken from this: **assert on the artifact, not on the exit
+code** — the anonymous `HTTP 200` is trustworthy in a way `$?` was not — and **negative-test
+the check itself**, exactly as `scripts/validate-manifests.sh` was negative-tested by
+inducing a typo. That validator is trustworthy because it has been observed to fail; these
+push checks had not been, and it showed.
+
 **Connectors configured.**
 
 | Connector | Auth method | Test Connection |
