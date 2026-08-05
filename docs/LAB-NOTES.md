@@ -317,11 +317,56 @@ operations, so the delete only succeeded once that operation finally gave up. An
 cluster names are unique *per zone*, the replacement in `us-central1-c` could be created
 while the broken one still existed in `us-central1-a`, which made the rebuild non-blocking.
 
+### Decision — switching to GKE Autopilot
+
+After `us-central1-a` and `us-central1-c` both returned
+`ZONE_RESOURCE_POOL_EXHAUSTED`, continuing to hunt for a zone with spare
+`e2-standard-2` capacity was solving the wrong problem. The cluster was moved to
+**GKE Autopilot**.
+
+The reasoning is worth stating precisely, because it is not "Autopilot has more
+capacity":
+
+- **The failure mode disappears rather than moves.** Standard requires *you* to hold node
+  capacity, so scaling to zero surrenders it and returning means competing for VMs that
+  may not exist. Autopilot provisions against pod requests from a managed pool, so parking
+  is "no pods" rather than "no nodes," and there is no node-pool capacity to reclaim.
+- **It removes work that this lab is not about.** The exercise is a Harness CI/CD
+  implementation; node pools, machine types, and zone selection are incidental. Every hour
+  spent on them is an hour not spent on the thing being assessed.
+- **The billing model suits an intermittent lab.** Charges follow pod resource requests
+  rather than always-on nodes.
+
+**Costs of the switch**, recorded honestly: Autopilot enforces minimum resource requests,
+so the `100m` CPU requests in `k8s/values.yaml` are rounded up to Autopilot's floor — pods
+will report requests larger than the manifest asks for, which is expected and not drift.
+Autopilot is also regional, so it runs a node per zone; and it restricts privileged
+workloads, which is fine for the delegate and the application but would matter for
+node-level agents.
+
+**One self-inflicted error during the switch.** The first Autopilot attempt failed with:
+
+```
+Constraint constraints/compute.vmExternalIpAccess violated for project ...
+```
+
+Autopilot defaults to nodes with external IPs, which is exactly what Finding 1 documented
+as forbidden here. `--enable-private-nodes` fixed it. Recorded because the mistake is
+instructive: I had already written the finding and still failed to apply it to a new
+resource type. **A documented constraint is not an applied constraint** — org policies bind
+every resource that creates VMs, and each new provisioning path has to be re-checked
+against them rather than assumed compliant.
+
+The regional Cloud NAT needed no change; it already covered every zone Autopilot places
+nodes in.
+
 **References.**
 - Org policy constraints: https://cloud.google.com/resource-manager/docs/organization-policy/org-policy-constraints
 - Master authorized networks: https://cloud.google.com/kubernetes-engine/docs/how-to/authorized-networks
 - Resizing a cluster: https://cloud.google.com/kubernetes-engine/docs/how-to/resizing-a-cluster
 - Resource availability / stockouts: https://cloud.google.com/compute/docs/troubleshooting/troubleshooting-vm-creation
+- Autopilot overview: https://cloud.google.com/kubernetes-engine/docs/concepts/autopilot-overview
+- Autopilot resource minimums: https://cloud.google.com/kubernetes-engine/docs/concepts/autopilot-resource-requests
 - GKE private clusters: https://cloud.google.com/kubernetes-engine/docs/how-to/private-clusters
 - Cloud NAT: https://cloud.google.com/nat/docs/overview
 - kubectl auth plugin: https://cloud.google.com/kubernetes-engine/docs/how-to/cluster-access-for-kubectl
