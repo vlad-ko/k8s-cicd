@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{.Values.name}}
+  labels:
+    app: {{.Values.name}}
+spec:
+  # LoadBalancer, so GKE provisions a real external IP and the deployment can be
+  # verified with an ordinary HTTP request instead of a port-forward. The
+  # resulting URL is the evidence for the CD exercise.
+  #
+  # Note this is unaffected by the org's compute.vmExternalIpAccess DENY policy:
+  # that constraint governs external IPs on VM instances, not load balancer
+  # forwarding rules. The nodes stay private; the load balancer is still public.
+  type: LoadBalancer
+  selector:
+    app: {{.Values.name}}
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP

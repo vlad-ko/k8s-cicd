@@ -1,0 +1,32 @@
+app:
+  # Substituted from the POM at build time by Maven resource filtering.
+  version: "@project.version@"
+  # Injected by the Kubernetes Deployment from the Harness pipeline run,
+  # so a running pod can name the pipeline execution that produced it.
+  build: "${BUILD_ID:local}"
+
+server:
+  port: 8080
+  shutdown: graceful
+
+spring:
+  application:
+    name: harness-lab-app
+  lifecycle:
+    # Let in-flight requests drain before the JVM exits, so rolling deploys
+    # do not drop connections when Kubernetes terminates the old pods.
+    timeout-per-shutdown-phase: 20s
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # Health only. The full actuator surface has no place on a
+        # LoadBalancer-exposed service.
+        include: health
+  endpoint:
+    health:
+      probes:
+        # Serves /actuator/health/liveness and /actuator/health/readiness,
+        # which the Deployment's probes target.
+        enabled: true

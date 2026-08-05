@@ -1,0 +1,19 @@
+# Harness resolves this file and substitutes the values into the manifests in
+# this directory using Go templating.
+#
+# Keys here MUST match the {{.Values.x}} references in deployment.yaml and
+# service.yaml — a typo surfaces as a rendering failure at deploy time, not at
+# commit time, so treat this file and the manifests as one unit.
+
+name: harness-lab-app
+
+replicas: 2
+
+# Resolved by Harness at runtime from the artifact configured on the Service.
+# Never hard-code an image reference here: that would decouple the deployed
+# artifact from the one the CI stage just built and pushed.
+image: <+artifact.image>
+
+# The Harness pipeline execution that produced the running image. Surfaced by
+# the app at GET / so a live pod can be traced back to its pipeline run.
+buildId: <+pipeline.sequenceId>
