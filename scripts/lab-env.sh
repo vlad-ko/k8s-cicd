@@ -7,24 +7,35 @@
 #   GCP_PROJECT_ID=your-project-id
 #
 # Everything else has a sensible default and rarely needs overriding.
+#
+# ---------------------------------------------------------------------------
+# The cluster is GKE **Autopilot**, which changes the lifecycle model.
+#
+# There are no node pools, so there is nothing to resize. Autopilot provisions
+# nodes to fit the pods you ask for and reclaims them when the pods go away.
+# Parking is therefore "scale the workloads to zero" and the node cost follows,
+# rather than "surrender the nodes and hope the capacity is still there later" —
+# which is precisely how the Standard cluster stranded us (see Finding 7).
+# ---------------------------------------------------------------------------
 
 set -euo pipefail
 
-# Load local overrides if present.
 _here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 [ -f "${_here}/lab.env" ] && . "${_here}/lab.env"
 
 : "${GCP_PROJECT_ID:?Set GCP_PROJECT_ID (put it in scripts/lab.env)}"
 
-ZONE="${ZONE:-us-central1-a}"
-REGION="${REGION:-${ZONE%-*}}"
-CLUSTER="${CLUSTER:-harness-lab}"
-NODE_POOL="${NODE_POOL:-default-pool}"
-NODE_COUNT="${NODE_COUNT:-2}"
-MACHINE_TYPE="${MACHINE_TYPE:-e2-standard-2}"
+# Autopilot clusters are always regional. --location works for regional and
+# zonal alike, so the scripts do not care which this is.
+LOCATION="${LOCATION:-us-central1}"
+REGION="${REGION:-us-central1}"
+CLUSTER="${CLUSTER:-harness-lab-auto}"
 ROUTER="${ROUTER:-harness-lab-router}"
 NAT="${NAT:-harness-lab-nat}"
+
+APP_NAMESPACES="${APP_NAMESPACES:-dev prod}"
+DELEGATE_NS="${DELEGATE_NS:-harness-delegate-ng}"
 
 GC="gcloud --project=${GCP_PROJECT_ID}"
 
@@ -32,9 +43,10 @@ log()  { printf '\033[0;36m==>\033[0m %s\n' "$1"; }
 warn() { printf '\033[1;33m !! \033[0m%s\n' "$1"; }
 ok()   { printf '\033[0;32m ✓ \033[0m%s\n' "$1"; }
 
-# The nodes cannot hold external IPs (inherited org policy denies it), so all
+# Nodes cannot hold external IPs (inherited org policy denies it), so all
 # outbound traffic — including the delegate's connection to Harness — depends on
-# Cloud NAT existing. Both lifecycle scripts treat it as part of the cluster.
+# Cloud NAT. It is regional, so it covers every zone Autopilot might place nodes
+# in. Both lifecycle scripts treat it as part of the cluster.
 ensure_nat() {
   if ! $GC compute routers describe "$ROUTER" --region="$REGION" >/dev/null 2>&1; then
     log "Creating Cloud Router ${ROUTER}"
@@ -56,51 +68,54 @@ remove_nat() {
   ok "Cloud NAT removed"
 }
 
-# Resize the node pool and wait for the operation to actually finish.
+# Only meaningful if the cluster restricts control-plane access. Autopilot may or
+# may not enable authorized networks depending on how it was created, so this is
+# a no-op when the allow-list is not in use rather than an error.
 #
-# `gcloud container clusters resize` blocks on a client-side wait that gives up
-# well before GKE does, then exits non-zero while the operation is still RUNNING
-# server-side. Under `set -e` that aborts the rest of the script even though
-# nothing is wrong — which is exactly how the first real lab-up.sh run left the
-# kubeconfig unrefreshed and the control-plane allow-list unset.
-#
-# So: dispatch asynchronously, then poll the operation ourselves. The operation
-# status is the source of truth, not the client's patience.
-resize_pool() {
-  local count="$1" op
-  log "Scaling ${NODE_POOL} to ${count} nodes"
-  op=$($GC container clusters resize "$CLUSTER" --zone="$ZONE" \
-         --node-pool="$NODE_POOL" --num-nodes="$count" --quiet --async \
-         --format='value(name)')
-  if [ -z "$op" ]; then
-    warn "Could not dispatch resize operation"; return 1
-  fi
-  printf '    waiting on %s' "$op"
-  local status
-  while :; do
-    status=$($GC container operations describe "$op" --zone="$ZONE" --format='value(status)' 2>/dev/null || true)
-    case "$status" in
-      DONE) printf '\n'; ok "Node pool at ${count}"; return 0 ;;
-      ABORTING|""|ABORTED) printf '\n'; warn "Resize operation ended as: ${status:-unknown}"; return 1 ;;
-      *) printf '.'; sleep 15 ;;
-    esac
-  done
-}
-
-# The control plane allow-list is pinned to a single residential IP, which changes.
-# Re-authorizing on every start-up avoids a confusing "kubectl times out" session.
-# Note curl -4: this network returns an IPv6 address by default, and GKE's
+# curl -4 is deliberate: this network answers with IPv6 by default, and GKE's
 # authorized-networks field accepts IPv4 CIDR only.
 authorize_current_ip() {
-  local ip
+  local enabled ip
+  enabled=$($GC container clusters describe "$CLUSTER" --location="$LOCATION" \
+              --format='value(masterAuthorizedNetworksConfig.enabled)' 2>/dev/null || true)
+  if [ "$enabled" != "True" ]; then
+    ok "Control plane is not restricted by authorized networks; nothing to do"
+    return 0
+  fi
   ip="$(curl -4 -s --max-time 10 https://ifconfig.me || true)"
   case "$ip" in
     *.*.*.*) ;;
     *) warn "Could not determine an IPv4 address; skipping authorized-networks update"; return 0 ;;
   esac
   log "Authorizing current IPv4 (…${ip##*.}) for control plane access"
-  $GC container clusters update "$CLUSTER" --zone="$ZONE" \
+  $GC container clusters update "$CLUSTER" --location="$LOCATION" \
     --enable-master-authorized-networks \
     --master-authorized-networks="${ip}/32" >/dev/null
   ok "Control plane reachable from this machine"
+}
+
+refresh_kubeconfig() {
+  log "Refreshing kubeconfig"
+  $GC container clusters get-credentials "$CLUSTER" --location="$LOCATION" >/dev/null 2>&1
+}
+
+# Scale every Deployment and StatefulSet in a namespace. Both kinds are covered
+# because the Harness delegate has shipped as each at different versions, and
+# guessing wrong would silently leave it running.
+scale_ns() {
+  local ns="$1" replicas="$2"
+  kubectl get ns "$ns" >/dev/null 2>&1 || return 0
+  local targets
+  targets=$(kubectl get deploy,statefulset -n "$ns" -o name 2>/dev/null || true)
+  [ -z "$targets" ] && return 0
+  # shellcheck disable=SC2086
+  kubectl scale --replicas="$replicas" -n "$ns" $targets >/dev/null 2>&1 || true
+  printf '    %s -> %s replicas\n' "$ns" "$replicas"
+}
+
+# Replica counts live in the environment values files, so resume restores what
+# the deployment actually asks for rather than a number duplicated in this script.
+replicas_for() {
+  local env="$1" f="${_here}/../k8s/env/${env}/values.yaml"
+  [ -f "$f" ] && sed 's/#.*//' "$f" | awk '/^replicas:/{print $2; exit}' || echo 1
 }
