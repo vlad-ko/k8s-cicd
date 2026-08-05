@@ -30,10 +30,13 @@ the exercise, so failures are treated as findings rather than as noise.
 | Host OS | macOS (Darwin 25.4.0) |
 | kubectl | v1.34.1 |
 | Docker | 29.4.0 (Docker Desktop) |
-| Cluster | GKE — Standard, zonal, public |
+| Cluster | GKE Standard, zonal (`us-central1-a`), 2 × `e2-standard-2` |
+| Cluster networking | **Private nodes** + Cloud NAT for egress; public control plane endpoint restricted by authorized networks (see Findings 1 and 3) |
+| Kubernetes version | v1.35.6-gke.1250000 |
 | Registry | Docker Hub, public repository |
 | Build infra | Harness Cloud (hosted) |
 | Deploy target | `dev` namespace, in-cluster Harness Delegate |
+| App | Spring Boot 3.3.5 on Java 21, built with Maven |
 
 ---
 
