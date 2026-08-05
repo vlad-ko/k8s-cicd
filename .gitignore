@@ -43,3 +43,6 @@ Thumbs.db
 *.iml
 .vscode/
 *.swp
+
+# Local lab config — holds a project identifier
+scripts/lab.env
