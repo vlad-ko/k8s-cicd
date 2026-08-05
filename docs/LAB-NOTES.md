@@ -697,13 +697,102 @@ the check itself**, exactly as `scripts/validate-manifests.sh` was negative-test
 inducing a typo. That validator is trustworthy because it has been observed to fail; these
 push checks had not been, and it showed.
 
-**Connectors configured.**
+### Gate G3 — connectors ✅
 
-| Connector | Auth method | Test Connection |
-|---|---|---|
-| GitHub | PAT (Harness secret) | ⬜ |
-| Docker Hub | access token (Harness secret) | ⬜ |
-| Kubernetes | delegate credentials | ⬜ |
+| Connector | Identifier | Auth | Connectivity | Test |
+|---|---|---|---|---|
+| GitHub | `github` | PAT in Harness secret `github_pat` | Harness Platform | ✅ |
+| Docker Hub | `dockerhub` | Access token in `dockerhub_token` | Harness Platform | ✅ |
+| Kubernetes | `gkeautopilot` | **Delegate credentials**, tag-scoped to `webo-moneyworld` | via delegate | ✅ |
+
+**The Kubernetes connector stores no cluster credentials at all.** The alternative offered —
+"specify master URL and credentials" — would mean pasting the control-plane endpoint and a
+service-account token into a SaaS platform, and requiring that endpoint to be reachable from
+outside. Choosing delegate credentials instead means the delegate authenticates locally with
+its mounted service-account token and **the credential never leaves the cluster**. That is
+the clearest single argument for the delegate model, and it is a configuration choice rather
+than a claim.
+
+The connector is scoped by delegate **tag** rather than "any available delegate". With one
+delegate the behaviour is identical, but the habit matters: once a customer runs delegates in
+dev, staging and prod, "any available" means a dev-scoped delegate can be handed a prod
+deployment. Tag-scoped selection is what keeps environments genuinely isolated.
+
+**Connectivity modes are not arbitrary.** GitHub and Docker Hub connect through the Harness
+Platform because both are publicly reachable and CI runs on Harness Cloud — routing them
+through the delegate would couple builds to the cluster being up, for no benefit. The
+Kubernetes connector has no such choice, which is the same "CI needs no delegate, CD does"
+distinction surfacing as a config option.
+
+A clarification in the UI worth quoting, because it resolves a common confusion:
+
+> "A Harness Delegate will be used for deployment operations, even if Connect through Harness
+> Platform is selected."
+
+Connectivity mode governs only how Harness reaches *that provider*. It says nothing about how
+deployments reach the cluster.
+
+### Finding 10 — display names and identifiers drift apart
+
+Two surprises, same root cause:
+
+- The project shows as `k8s-cicd-lab` in every breadcrumb, but its identifier is
+  `default_project` — the auto-created Default Project had been renamed rather than replaced.
+- The Kubernetes connector is named `gke-autopilot`, but its identifier is `gkeautopilot`;
+  Harness identifiers do not permit hyphens.
+
+**Identifiers are immutable once created; display names are not.** Every pipeline, template
+and API call references the *identifier*, so the string in the console and the string in
+automation can diverge permanently. Renaming does not fix it — the identifier is fixed at
+creation.
+
+Practical consequence for anyone scripting against a customer account: read identifiers from
+the API, never infer them from display names. A wrong identifier surfaces as "connector not
+found", which reads like a permissions problem and is not.
+
+Recorded for reference — these are what the templates reference:
+
+```
+orgIdentifier:     default
+projectIdentifier: default_project
+connectors:        github · dockerhub · gkeautopilot
+secrets:           github_pat · dockerhub_token
+delegate tag:      webo-moneyworld
+```
+
+### Finding 11 — the Harness CLI cannot manage connectors
+
+Before clicking through three wizards, I checked whether this could be automated. `hc`
+v1.3.40 (current) exposes only:
+
+```
+artifact · registry · iacm · auth
+```
+
+There is **no connector, pipeline, template, service or environment command** — the CLI is
+scoped to Artifact Registry and IaCM. Platform-resource automation means the **Terraform
+provider** (`harness/harness`, which has `platform_connector_*` resources for github, docker
+and kubernetes) or the **REST API**.
+
+Worth knowing before promising a customer a CLI-driven bootstrap. The Terraform provider was
+the right tool and was deliberately deferred: connectors were created through the UI to keep
+the critical path moving, with the note that a production setup would put the platform layer
+(connectors, secrets, environments) in Terraform while leaving pipelines and templates to Git
+Experience — two layers, two owners, one source of truth each.
+
+### Smaller frictions worth recording
+
+**"GitOps → Repositories" is not "Connectors".** Harness GitOps is a separate, pull-based
+deployment model (ArgoCD underneath) with its own repository registry. Both are called
+repositories and both live behind a "Settings" tab. Connectors are under *Project Settings*;
+the GitOps section is unrelated to this lab.
+
+**Docker Hub access tokens are shown exactly once.** The token was lost between creating it
+and configuring the connector, requiring a fresh one. The old token was deleted rather than
+abandoned — an unusable credential that still grants access is worse than no credential.
+This is the argument for **one token per consumer**: the replacement is named
+`harness-connector`, so revoking it at teardown revokes exactly Harness's access and nothing
+else.
 
 **Pipeline — Build stage.**
 <!-- Infrastructure: Harness Cloud. Steps: Run (mvn) → Build and Push. -->
