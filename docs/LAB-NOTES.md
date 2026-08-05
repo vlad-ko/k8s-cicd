@@ -242,6 +242,72 @@ Namespaces `dev` and `harness-delegate-ng` created.
 
 **Goal.** Build the application from source and publish a tagged image to a public registry.
 
+### Decision record — why a separate registry exists at all
+
+Worth stating plainly, because it is the architectural seam of the whole exercise:
+**Kubernetes cannot run source code.** It runs images, and it obtains them by pulling from
+a registry — a Deployment's `image:` field is a registry pointer, and there is no mode
+where you hand Kubernetes a Git URL. So a registry is not an optional convenience between
+build and deploy; it is the mechanism by which deployment happens at all.
+
+Three consequences:
+
+- **The build host is ephemeral.** Harness Cloud runners are destroyed when the build ends.
+  An image existing only on the runner's local daemon evaporates minutes later.
+- **The cluster cannot reach the build host.** Nodes pull images themselves, on their own
+  initiative. They need a durable, authenticated, network-reachable address.
+- **It is the CI/CD boundary.** CI's job ends at "produce an artifact"; CD's begins at
+  "consume an artifact." That decoupling is exactly why the two stages can run on different
+  infrastructure — CI on Harness Cloud, CD through the delegate — and still compose.
+
+This is also why images are tagged `<+pipeline.sequenceId>` rather than `latest`: an
+immutable tag means "what is running in prod" has an exact answer and rollback is simply
+redeploying the previous tag. `latest` destroys both properties.
+
+### Decision record — Docker Hub over Artifact Registry or Artifactory
+
+The instinct to consolidate on an existing registry is correct **in production** — one auth
+model, one RBAC surface, existing retention and vulnerability scanning, no additional
+vendor. Harness has first-class connectors for Artifactory and for any standard registry,
+so there is no integration penalty. See §6.
+
+For this lab three constraints pointed the other way:
+
+1. **The brief requires a *public* registry**, and a grader who cannot pull the image cannot
+   verify the artifact half of the exercise. A private registry would also require an
+   `imagePullSecret`, adding configuration that exists only to work around a self-inflicted
+   constraint.
+2. **Credentials.** Wiring an organization's production registry would mean placing its
+   credentials into a **free-trial SaaS tenant** created for a homework exercise. That is
+   the wrong place for production artifact-store credentials regardless of how short-lived
+   the exercise is.
+3. **Isolation.** The lab deliberately runs in a throwaway project. Routing artifacts
+   through a production registry re-couples them and leaves lab images behind after
+   teardown.
+
+### Finding 4 — org policy also rules out a public Artifact Registry
+
+Google Artifact Registry would otherwise have been the natural choice here: same cloud, no
+extra account. It is not usable as a *public* registry under this organization's policy:
+
+```
+$ gcloud resource-manager org-policies describe constraints/iam.allowedPolicyMemberDomains \
+    --project=<GCP_PROJECT_ID> --effective
+listPolicy:
+  allowedValues:
+  - <CUSTOMER_ID>          # domain-restricted sharing
+```
+
+Making an Artifact Registry repository publicly pullable requires granting the
+`artifactregistry.reader` role to `allUsers`. Domain-restricted sharing blocks precisely
+that grant, and `storage.publicAccessPrevention` is enforced as well. The policy is
+correct — it is what stops accidental public exposure of internal artifacts — but it means
+"public registry" and "this GCP organization" are mutually exclusive by design.
+
+This is the third org-level policy to shape the architecture, after the external-IP denial
+in §1. A recurring lesson: **check effective org policy before choosing an approach, not
+after the error message.**
+
 **Connectors configured.**
 
 | Connector | Auth method | Test Connection |
@@ -335,11 +401,46 @@ from the same external IP.
 **What surprised me.**
 
 **What I'd do differently in production.**
-<!-- Narrower RBAC than cluster-admin on the delegate ServiceAccount; private registry;
-     canary or blue-green over rolling; policy-as-code gates; GitOps; multi-environment
-     promotion with approvals; pipeline-as-code in Git. -->
+
+**Consolidate on the existing artifact registry.** The strongest single change. An
+organization already running Artifactory (or Artifact Registry, or ECR) should not add a
+second registry to adopt a CD tool. One registry means one authentication model, one RBAC
+surface, existing retention and vulnerability-scanning policy applied uniformly, one place
+to audit, and no additional vendor relationship. Harness connects to Artifactory natively,
+both as an artifact source and as a CI publish target, so this costs nothing in
+integration effort — it is a connector swap and an image path, with nothing downstream
+depending on the choice.
+
+The lab uses Docker Hub only because the exercise requires a publicly pullable image and
+because production credentials do not belong in a trial tenant (§3). Those are properties
+of the exercise, not of the architecture.
+
+**Narrow the delegate's RBAC.** The generated delegate manifest binds its ServiceAccount to
+`cluster-admin`, which is convenient and far broader than deployment requires. In
+production this should be a scoped Role bound to the namespaces the delegate actually
+deploys into, and ideally one delegate per environment so a dev-scoped delegate holds no
+credentials that reach prod.
+
+**Separate cluster lifecycle from application delivery.** Provisioning belongs to a
+platform team's Terraform (or Harness IaCM), not to the pipeline that ships the app.
+Beyond being the conventional split, it avoids a Terraform step destroying the cluster
+hosting the delegate executing it.
+
+**Add governance gates.** OPA policy-as-code on the pipeline (enforcing, for example, that
+prod deployments cannot use `latest`, or that an approval step exists before any prod
+stage), plus notifications wired to the team's channel rather than living only in the
+Harness UI.
+
+**Replace manual approval with automated verification** where the signal exists — Harness
+continuous verification against metrics, so promotion is gated on observed health rather
+than a human deciding the canary looks fine.
 
 **Open questions.**
+- Does the Harness free trial include IaCM? If so, cluster provisioning could be
+  demonstrated end to end rather than described.
+- Harness Code Repository and Harness Artifact Registry could collapse this three-vendor
+  stack to one. Worth evaluating for a greenfield customer; not worth an SCM migration for
+  an established one.
 
 ---
 
