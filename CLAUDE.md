@@ -216,7 +216,32 @@ proceed to the next phase.
 
 ---
 
-## 7. Working style
+## 7. Workflow — issues, branches, PRs
+
+`main` is protected by a ruleset: pull requests required, no force-push, no deletion.
+Repository admins can bypass, so you are never locked out — but bypassing is for
+emergencies, not for convenience.
+
+**Every unit of work starts as a GitHub issue** with acceptance criteria, and ends when
+those criteria are checked off. The issue is the source of truth for scope; the checkbox
+state is the live completion ledger, so tick them as work merges rather than batching to
+the end.
+
+```
+issue  →  branch  →  commits  →  PR (closes #N)  →  merge  →  tick criteria
+```
+
+- **Branch naming:** `feat/`, `fix/`, `docs/`, `chore/` + short slug
+- **Commit and PR titles:** conventional-commit prefix
+- **PR body:** `Closes #N` so the issue closes on merge
+- **Before every push:** run the PII scan from §3 — this repo is public
+
+The first thirteen commits predate this and went directly to `main`. That was a process
+gap, not a precedent.
+
+---
+
+## 8. Working style
 
 The `wizard` skill (`/wizard`) and its agent roster are installed under `.claude/`. It
 was written for application feature work, so **adapt it to this repo rather than applying
