@@ -205,9 +205,123 @@ Namespaces `dev` and `harness-delegate-ng` created.
 
 **Screenshot:** `screenshots/01-cluster-nodes.png`
 
+### Cost control — parking the cluster between sessions
+
+A lab spread over several days should not bill continuously. GKE has no pause, so
+`scripts/lab-down.sh` scales the node pool to zero — which deletes the node VMs **and**
+their boot disks — and removes the Cloud NAT gateway, which bills hourly whether or not
+anything routes through it. Measured at list prices, that is roughly 97% of the hourly
+cost. The cluster object itself survives, so namespaces, the installed delegate, and every
+Harness-side connector and pipeline remain valid; resuming is about two minutes rather
+than a rebuild.
+
+`scripts/lab-up.sh` reverses it, and **order matters**: NAT is recreated *before* nodes
+scale up. Reversed, nodes boot with no egress and the delegate comes up unable to reach
+Harness — which presents as a Harness fault rather than a networking one, the same trap as
+Finding 1.
+
+### Finding 6 — `gcloud ... resize` reports failure while succeeding
+
+The first real `lab-up.sh` run aborted partway through:
+
+```
+ERROR: (gcloud.container.clusters.resize) Operation [...] is still running,
+check its status via 'gcloud container operations describe ...'
+```
+
+`gcloud container clusters resize` blocks on a **client-side** wait that gives up well
+before GKE finishes, then exits non-zero — while the operation continues `RUNNING`
+server-side. Nothing had actually failed. But under `set -e` the non-zero exit killed the
+rest of the script, so the kubeconfig was never refreshed and the control-plane allow-list
+was never updated. The result was a cluster coming up perfectly normally and unreachable
+from this machine, for reasons unrelated to the cluster.
+
+Fixed by dispatching with `--async` and polling `gcloud container operations describe`
+until `DONE`, treating **operation status as the source of truth rather than the client's
+patience**.
+
+This is the same class of error as Finding 5: trusting an exit code instead of the
+observable state. Twice in one lab, in opposite directions — once a failure reported as
+success, once a success reported as failure. The general lesson is that for asynchronous
+cloud operations the CLI's exit code describes *the CLI's experience*, not the operation's
+outcome, and any automation that treats the two as equivalent will eventually be wrong.
+
+### Finding 7 — scaling to zero can strand you: `ZONE_RESOURCE_POOL_EXHAUSTED`
+
+Parking the cluster worked. **Un-parking it did not.**
+
+```
+ZONE_RESOURCE_POOL_EXHAUSTED
+Instance 'gke-harness-lab-default-pool-...' creation failed: the zone
+'us-central1-a' does not have enough resources available to fulfill the request.
+```
+
+GKE retried every few minutes for roughly twenty minutes and failed every time. The
+cluster and its configuration were fine; the zone had simply run out of `e2-standard-2`.
+
+**Diagnosis.** The cluster sat in `RECONCILING` with no instances, which says nothing on
+its own. The managed instance group was the useful signal — target size 2, actual size 0,
+`isStable: false` — and `gcloud compute instance-groups managed list-errors` gave the
+actual reason. Worth remembering: *when GKE nodes do not appear, the MIG holds the error,
+not the cluster.*
+
+**Attempted fix that also failed.** A different machine family draws from a different
+capacity pool, so I created an `n2-standard-2` pool in the same zone. It hit the identical
+error 14 times — the zone was broadly constrained, not short of one machine type.
+
+**Actual fix.** A zonal cluster cannot span zones, so the node pool could not be moved.
+Rebuilt the cluster in **us-central1-c**, where capacity existed. This was cheap precisely
+because the cluster held nothing yet — no delegate, no workloads, three namespaces.
+Cloud NAT is *regional*, so it covered the new zone with no change.
+
+**The lesson, which is the important part.** Scaling to zero to save money **releases your
+claim on capacity, and that capacity is not reserved for you.** Coming back means
+re-requesting from a shared pool that may have none. The cost saving is real and so is the
+risk; it was a mistake not to state that tradeoff when adopting the strategy rather than
+after discovering it.
+
+For a lab this is an inconvenience. For a customer running scale-to-zero on non-production
+environments, it is a genuine availability consideration, and there are real mitigations:
+
+| Mitigation | Trade-off |
+|---|---|
+| **Regional cluster / multi-zone node pool** | Survives a single-zone stockout — the strongest fix. Costs nodes per zone |
+| **Reservations** | Guarantees capacity; you pay for it whether or not it is used |
+| **Keep a minimum node count above zero** | Retains a foothold, but does not reserve capacity for scale-up |
+| **Accept and automate retry across zones** | Free; only viable where downtime is tolerable |
+
+For this lab the right answer is "accept it and rebuild elsewhere," which is what happened.
+For anything with an availability requirement it would be a regional cluster.
+
+**A self-inflicted complication during the rebuild.** The first replacement cluster came up
+`ERROR`:
+
+```
+Conflicting IP cidr range: Invalid IPCidrRange: 172.16.0.0/28 conflicts with
+existing subnetwork 'gke-harness-lab-...-pe-subnet' in region 'us-central1'.
+```
+
+I had reused `--master-ipv4-cidr=172.16.0.0/28` from the original command. A private
+cluster's control-plane range is backed by a **regional** private-endpoint subnet, so while
+the old cluster still existed in `us-central1-a`, a new cluster anywhere in `us-central1`
+could not claim the same range. Rebuilt with `172.16.16.0/28`.
+
+The general point: a private cluster's master CIDR is a **regional** allocation, not a
+zonal one. Any runbook that recreates private clusters needs to either allocate a distinct
+range or confirm the predecessor is fully deleted first — and "fully deleted" is doing real
+work in that sentence, because a cluster stuck in `RECONCILING` still holds its subnet.
+
+**Two smaller notes.** Deleting the old cluster initially failed with `Cluster is running
+incompatible operation` — the failed resize still held a lock, and GKE serializes cluster
+operations, so the delete only succeeded once that operation finally gave up. And because
+cluster names are unique *per zone*, the replacement in `us-central1-c` could be created
+while the broken one still existed in `us-central1-a`, which made the rebuild non-blocking.
+
 **References.**
 - Org policy constraints: https://cloud.google.com/resource-manager/docs/organization-policy/org-policy-constraints
 - Master authorized networks: https://cloud.google.com/kubernetes-engine/docs/how-to/authorized-networks
+- Resizing a cluster: https://cloud.google.com/kubernetes-engine/docs/how-to/resizing-a-cluster
+- Resource availability / stockouts: https://cloud.google.com/compute/docs/troubleshooting/troubleshooting-vm-creation
 - GKE private clusters: https://cloud.google.com/kubernetes-engine/docs/how-to/private-clusters
 - Cloud NAT: https://cloud.google.com/nat/docs/overview
 - kubectl auth plugin: https://cloud.google.com/kubernetes-engine/docs/how-to/cluster-access-for-kubectl
