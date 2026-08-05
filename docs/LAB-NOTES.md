@@ -16,7 +16,7 @@ the exercise, so failures are treated as findings rather than as noise.
 | # | Exercise | Status |
 |---|---|---|
 | 1 | Kubernetes cluster set up | ✅ |
-| 2 | Harness trial & delegate install | 🟡 |
+| 2 | Harness trial & delegate install | ✅ |
 | 3 | Harness CI | ⬜ |
 | 4 | Harness CD | ⬜ |
 | 5 | Bonus — templates | ⬜ |
@@ -30,13 +30,14 @@ the exercise, so failures are treated as findings rather than as noise.
 | Host OS | macOS (Darwin 25.4.0) |
 | kubectl | v1.34.1 |
 | Docker | 29.4.0 (Docker Desktop) |
-| Cluster | GKE Standard, zonal (`us-central1-a`), 2 × `e2-standard-2` |
-| Cluster networking | **Private nodes** + Cloud NAT for egress; public control plane endpoint restricted by authorized networks (see Findings 1 and 3) |
+| Cluster | **GKE Autopilot**, regional (`us-central1`) — adopted after repeated zone capacity stockouts on Standard (Finding 7) |
+| Cluster networking | **Private nodes** + regional Cloud NAT for egress; control plane not restricted by authorized networks |
 | Kubernetes version | v1.35.6-gke.1250000 |
 | Registry | Docker Hub, public repository |
 | Build infra | Harness Cloud (hosted) |
-| Deploy target | `dev` namespace, in-cluster Harness Delegate |
-| App | Spring Boot 3.3.5 on Java 21, built with Maven |
+| Deploy target | `dev` and `prod` namespaces, via an in-cluster Harness Delegate |
+| Delegate | `webo-moneyworld`, Helm chart, version 26.07.89703 |
+| App | [Webo's Money World](https://github.com/wealthbot-io/webo-money-world) — static frontend + two Vercel serverless functions, containerized on Node 22 |
 
 ---
 
@@ -377,23 +378,103 @@ nodes in.
 
 **Goal.** A delegate running in-cluster and connected to the Harness control plane.
 
-**Approach & rationale.**
-<!-- Delegate install method chosen (YAML vs Helm) and why. What the manifest creates:
-     namespace, ServiceAccount, ClusterRoleBinding — and why the K8s connector later
-     depends on that ServiceAccount. -->
+**Approach & rationale.** Installed via the **Helm chart** rather than the raw Kubernetes
+manifest. Helm was already required for the lab, upgrades become `helm upgrade` instead of
+re-applying YAML, and the release is cleanly removable — closer to how a customer would
+actually run it. The delegate was named `webo-moneyworld`; that name is what delegate
+*selectors* reference later when scoping a connector or a pipeline stage.
 
-**Gate G2 — delegate pod + Harness UI status**
+**What the chart creates.** A `Deployment` (not a StatefulSet — the delegate has shipped as
+each across versions, which is why the lifecycle scripts scale both kinds), plus an hourly
+`CronJob` that self-upgrades the delegate. The upgrader is worth knowing about: it is a
+standing background workload, and a customer wanting a pinned delegate version would need
+to disable it.
+
+**Gate G2 — delegate pod and health** ✅
 ```
-<!-- kubectl get pods -n harness-delegate-ng -->
+$ kubectl get pods -n harness-delegate-ng
+NAME                               READY   STATUS    RESTARTS   AGE
+webo-moneyworld-857df956bb-5lnpf   1/1     Running   0          116s
+
+$ kubectl exec -n harness-delegate-ng <pod> -- curl -s -o /dev/null -w "%{http_code}" \
+    http://localhost:3460/api/health
+200
 ```
 
-**Screenshot:** `screenshots/02-delegate-connected.png` *(crop the account ID out of the URL bar)*
+Ready after ~45 seconds, **zero restarts**.
 
-**What broke / what I learned.**
-<!-- Prime candidates: pod Pending on insufficient resources; installs but never connects
-     (egress); CrashLoopBackOff on a bad token. Record the diagnosis path, not just the fix. -->
+### Reading the startup errors correctly
+
+For the first ~45 seconds the logs were full of stack traces:
+
+```
+Caused by: io.harness.health.HealthException: Delegate is not healthy. Heartbeat has expired.
+... "GET /api/health HTTP/1.1" 500 110 "-" "kube-probe/1.35"
+```
+
+**This is the readiness probe working, not a failure.** The delegate serves `/api/health` as
+500 until it completes its first handshake with Harness, so Kubernetes correctly holds the
+pod at `0/1` and keeps it out of service until it can actually do work. A delegate that
+reported `Ready` immediately would be the suspicious outcome. The signal to wait for is the
+transition to 200 — which is also the cluster-side confirmation of "Connected" in the UI,
+obtainable without opening the console.
+
+### Autopilot resource mutation, confirmed
+
+The install emitted:
+
+```
+Warning: autopilot-default-resources-mutator: Autopilot updated CronJob
+harness-delegate-ng/webo-moneyworld-upgrader-job: defaulted unspecified 'cpu'
+resource for containers [upgrader]
+```
+
+This is the behaviour predicted when the cluster moved to Autopilot, now observed on a real
+workload: Autopilot rewrites unspecified or under-minimum resource requests. Application
+pods will therefore report requests larger than `k8s/values.yaml` declares. That is expected
+and not configuration drift — which is why the base values file now states Autopilot's real
+minimums explicitly rather than smaller numbers that would be silently rewritten.
+
+### Finding 8 — Cloud NAT is not effective the moment it is created
+
+Bringing the cluster back before installing, `lab-up.sh` created Cloud NAT and immediately
+reported success. An egress check run seconds later failed:
+
+```
+app.harness.io HTTP 000 in 5.05s      # no response at all, not a rejection
+```
+
+Retried a minute later, from the same cluster with no configuration change:
+
+```
+--- DNS ---      Address: 35.201.91.229
+--- TCP/TLS ---  harness  HTTP 401 connect=0.039s
+--- generic ---  google   HTTP 200
+```
+
+Cloud NAT takes a minute or two to become effective after creation. `HTTP 000` versus an
+HTTP status is the distinguishing signal — no response at all means no path, whereas a 401
+means the path is fine.
+
+The consequence is a trap: `lab-up.sh` declares "Lab resumed" as soon as NAT is *created*,
+so a delegate started immediately afterwards would fail its initial registration with an
+error that looks like a Harness problem. Follow-up: `lab-up.sh` should verify egress rather
+than assume it, on the same principle as every other gate in this document — assert the
+observable behaviour, not the API call's return value.
+
+**Confirmed in the Harness UI:** delegate `webo-moneyworld`, connectivity **Connected**,
+version 26.07.89703, last heartbeat 26 seconds ago. Both the parent delegate entry and its
+pod instance report Connected.
+
+Worth noting the console shows *Auto Upgrade: DETECTING* — the upgrader CronJob had not yet
+run its first hourly pass. A customer who wants a pinned delegate version would disable that
+job rather than leave it self-updating.
+
+**Screenshot:** `screenshots/02-delegate-connected.png` *(crop the account ID from the URL bar and the signed-in email from the header)*
 
 **References.**
+- Delegate install: https://developer.harness.io/docs/platform/delegates/install-delegates/overview/
+- Autopilot resource defaults: https://cloud.google.com/kubernetes-engine/docs/concepts/autopilot-resource-requests
 
 ---
 
