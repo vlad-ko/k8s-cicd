@@ -1,31 +1,32 @@
-# ---------- build stage ----------
-FROM maven:3.9-eclipse-temurin-21 AS build
-WORKDIR /build
+# Webo's Money World — container image.
+#
+# No build stage: the app has no bundler and no dependencies (see package.json).
+# The static files ship as authored and the Vercel handlers are executed by
+# server.js, so there is nothing to compile and nothing to install. A multi-stage
+# build here would add a layer and save nothing.
 
-# Dependencies resolve in their own layer, keyed on the POM alone. Source edits
-# then reuse the cached layer instead of re-downloading the world every push.
-COPY pom.xml .
-RUN mvn -B -q dependency:go-offline
+FROM node:22-alpine
 
-COPY src ./src
-RUN mvn -B clean package
-
-# ---------- runtime stage ----------
-# JRE, not JDK: the compiler and build tooling have no reason to ship to production,
-# and leaving them out cuts both image size and attack surface.
-FROM eclipse-temurin:21-jre-alpine
-
-# Run unprivileged. Nothing here needs root, and a container that cannot write to
-# its own filesystem as root is materially harder to pivot from.
-RUN addgroup -S app && adduser -S -G app app
-
+# Run unprivileged. node:alpine already ships a `node` user, so there is no
+# reason to create another or to run as root.
 WORKDIR /app
-COPY --from=build /build/target/harness-lab-app-*.jar app.jar
-USER app
+
+# Ownership is set at copy time rather than with a later `chown -R`, which would
+# duplicate every file into a second layer.
+COPY --chown=node:node package.json server.js ./
+COPY --chown=node:node api ./api
+COPY --chown=node:node lib ./lib
+COPY --chown=node:node lessons ./lessons
+COPY --chown=node:node vendor ./vendor
+COPY --chown=node:node assets ./assets
+COPY --chown=node:node index.html styles.css app.mjs ./
+
+USER node
 
 EXPOSE 8080
+ENV PORT=8080 NODE_ENV=production
 
-# Exec form, so the JVM is PID 1 and receives SIGTERM directly from Kubernetes.
-# Wrapped in a shell it would not, and graceful shutdown would never run —
-# rolling deploys would drop in-flight requests.
-ENTRYPOINT ["java", "-XX:MaxRAMPercentage=75.0", "-jar", "/app/app.jar"]
+# Exec form, so node is PID 1 and receives SIGTERM directly from Kubernetes.
+# Wrapped in a shell it would not, the SIGTERM handler in server.js would never
+# fire, and rolling deploys would cut off in-flight requests.
+ENTRYPOINT ["node", "server.js"]

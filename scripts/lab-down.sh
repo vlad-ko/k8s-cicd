@@ -31,13 +31,13 @@ refresh_kubeconfig
 # Released first: a LoadBalancer forwarding rule bills hourly and would otherwise
 # linger with no pods behind it.
 for ns in $APP_NAMESPACES; do
-  if kubectl get svc harness-lab-app -n "$ns" >/dev/null 2>&1; then
+  if kubectl get svc "$APP_NAME" -n "$ns" >/dev/null 2>&1; then
     log "Removing LoadBalancer Service in ${ns}"
-    kubectl delete svc harness-lab-app -n "$ns" --wait=false >/dev/null 2>&1 || true
+    kubectl delete svc "$APP_NAME" -n "$ns" --wait=false >/dev/null 2>&1 || true
   fi
 done
 
-log "Scaling workloads to zero (Autopilot then reclaims the nodes)"
+log "Scaling workloads to zero (drives billable pod requests to zero)"
 for ns in $APP_NAMESPACES; do scale_ns "$ns" 0; done
 scale_ns "$DELEGATE_NS" 0
 

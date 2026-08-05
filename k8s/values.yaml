@@ -5,12 +5,13 @@
 # Keys here MUST match the {{.Values.x}} references in deployment.yaml and
 # service.yaml. A typo surfaces as a rendering failure at deploy time, not at
 # commit time, so treat this file and the manifests as one unit.
+# scripts/validate-manifests.sh checks both directions.
 #
 # Deliberately flat rather than nested: {{.Values.cpuRequest}} is harder to get
 # wrong than {{.Values.resources.requests.cpu}}, and the override files stay
 # trivial to read in a diff.
 
-name: harness-lab-app
+name: webo-money-world
 
 # Overridden per environment. The base value is intentionally conservative so
 # that a missing override under-provisions rather than over-provisions.
@@ -22,13 +23,22 @@ replicas: 1
 image: <+artifact.image>
 
 # The Harness pipeline execution that produced the running image. Surfaced by
-# the app at GET / so a live pod can be traced back to its pipeline run.
+# the app at GET /api/version so a live pod can be traced back to its run.
 buildId: <+pipeline.sequenceId>
 
 # Overridden per environment; surfaced as a pod label so `kubectl get pods -L env`
 # makes the promotion visible.
 environment: unset
 
-cpuRequest: 100m
-memoryRequest: 384Mi
-memoryLimit: 768Mi
+# Kubernetes Secret holding ANTHROPIC_API_KEY, populated from the Harness secret
+# manager. Referenced with optional: true, so the app still starts without it —
+# Ask Webo then returns its warming-up response instead of failing to schedule.
+secretName: webo-secrets
+
+# These are Autopilot's minimum billable request values, stated explicitly.
+# Autopilot silently rounds anything smaller up to them, so asking for 100m CPU
+# would show as 250m on the running pod and look like config drift. Naming the
+# real floor keeps the manifest honest about what is actually reserved.
+cpuRequest: 250m
+memoryRequest: 512Mi
+memoryLimit: 512Mi

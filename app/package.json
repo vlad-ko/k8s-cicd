@@ -1,0 +1,10 @@
+{
+  "name": "webo-money-world",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Webo's Money World - a free kids' financial-literacy demo (static + Vercel functions)",
+  "type": "commonjs",
+  "scripts": {
+    "test": "node --test"
+  }
+}
