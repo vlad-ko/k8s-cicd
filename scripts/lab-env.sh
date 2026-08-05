@@ -34,6 +34,7 @@ CLUSTER="${CLUSTER:-harness-lab-auto}"
 ROUTER="${ROUTER:-harness-lab-router}"
 NAT="${NAT:-harness-lab-nat}"
 
+APP_NAME="${APP_NAME:-webo-money-world}"
 APP_NAMESPACES="${APP_NAMESPACES:-dev prod}"
 DELEGATE_NS="${DELEGATE_NS:-harness-delegate-ng}"
 

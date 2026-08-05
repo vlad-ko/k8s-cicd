@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Webo's Money World</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;600;700;800&family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet">
+<!-- App logic is an ES module (lessons/ + lib/), not an inline <script>, so the CSP
+     keeps 'unsafe-inline' out of script-src (#24 M4). app.mjs registers the Alpine
+     component on `alpine:init`, so script order does not matter (both are deferred
+     and run before Alpine starts). Alpine.js is self-hosted (vendored) so the app
+     never depends on a third-party CDN being reachable (a blocked/slow CDN
+     previously made every Alpine-bound element vanish on load). -->
+<script type="module" src="/app.mjs"></script>
+<script defer src="/vendor/alpine-3.14.1.min.js"></script>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<div class="app" x-data="weboWorld" x-init="init()">
+
+  <header>
+    <div class="brand">
+      <div class="brand-mark">
+        <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="3" r="1.6" fill="#0a1628"/><rect x="11.3" y="4" width="1.4" height="3" fill="#0a1628"/><rect x="5" y="7" width="14" height="13" rx="2" fill="#0a1628"/><circle cx="9" cy="11.5" r="1.4" fill="#fff"/><circle cx="15" cy="11.5" r="1.4" fill="#fff"/><path d="M8 16 L12 19 L16 16" stroke="#fff" stroke-width="1.6" fill="none"/></svg>
+      </div>
+      <div class="brand-name">webo's <span>money world</span></div>
+    </div>
+    <div class="head-right">
+      <div class="star-count">
+        <svg viewBox="0 0 24 24" fill="#f5a623"><path d="M12 2l2.9 6.1 6.6.9-4.8 4.6 1.2 6.6L12 18.6 6.1 20.2l1.2-6.6L2.5 9l6.6-.9z"/></svg>
+        <span x-text="stars">0</span>
+      </div>
+      <button class="device-btn" @click="openCodeModal()" title="Save or move your progress">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3h11l3 3v15H5z"/><path d="M9 3v5h6"/><circle cx="12" cy="14" r="2.5"/></svg>
+        Save
+      </button>
+    </div>
+  </header>
+
+  <!-- WORLD HUB -->
+  <div class="world">
+    <div class="world-stars" x-ref="worldStars"></div>
+    <div class="world-title">Webo's World</div>
+    <div class="world-stage">
+      <!-- props are data-driven from the lesson registry (lessons/index.mjs):
+           each lesson carries its own prop SVG + position (prop.cls or prop.pos). -->
+      <template x-for="(l, i) in lessons" :key="l.id">
+        <div class="prop" :class="propClasses(i, l.completed)" :style="propStyle(i)" x-html="propHtml(i)"></div>
+      </template>
+
+      <!-- WEBO -->
+      <div class="webo" @click="tapWebo($el)" title="Tap me!">
+        <div class="webo-glow"></div>
+        <div x-html="weboSvg"></div>
+      </div>
+    </div>
+    <div class="webo-hint" x-text="hint">Tap Webo to say hi!</div>
+    <div class="progress">
+      <template x-for="(l, i) in lessons" :key="l.id">
+        <div class="dot" :class="{ done: l.completed }"></div>
+      </template>
+    </div>
+  </div>
+
+  <div class="section-label">Today's Lessons</div>
+  <div class="lessons" x-cloak>
+    <template x-for="(l, i) in lessons" :key="l.id">
+      <div class="lesson-card"
+           :class="{ locked: isLocked(i), complete: l.completed }"
+           @click="openLesson(i)">
+        <div class="lesson-ico" x-text="l.icon"></div>
+        <div class="lesson-body">
+          <div class="lesson-no" x-text="l.no"></div>
+          <div class="lesson-name" x-text="l.name"></div>
+          <div class="lesson-sub" x-text="l.sub"></div>
+        </div>
+        <div class="lesson-status" x-html="statusIcon(i)"></div>
+      </div>
+    </template>
+  </div>
+
+  <div class="footer-note">
+    A free financial-literacy demo from wealthbot.io. For learning only. No real money, no investment advice.
+  </div>
+
+  <!-- LESSON OVERLAY -->
+  <div class="overlay" :class="{ show: overlayOpen }" x-cloak
+       role="dialog" aria-modal="true" :aria-label="overlayTitle"
+       @keydown.escape.window="overlayOpen && closeOverlay()">
+    <div class="lesson-top">
+      <button class="back-btn" @click="closeOverlay()" aria-label="Back to lessons">&larr;</button>
+      <h2 x-text="overlayTitle">Lesson</h2>
+    </div>
+    <div class="lesson-scroll" x-ref="ovBody"></div>
+    <div class="lesson-actions" x-ref="ovActions"></div>
+  </div>
+
+  <!-- REWARD -->
+  <div class="reward" :class="{ show: rewardOpen }" x-cloak
+       role="dialog" aria-modal="true" aria-label="Lesson complete"
+       @keydown.escape.window="rewardOpen = false"
+       x-effect="rewardOpen && $nextTick(() => $refs.rewardBtn && $refs.rewardBtn.focus())">
+    <div class="reward-card">
+      <div class="big-webo" x-html="weboSvg" aria-hidden="true"></div>
+      <h2 x-text="rewardTitle">Awesome!</h2>
+      <p x-html="rewardText"></p>
+      <div class="reward-stars" aria-hidden="true">&#11088;&#11088;&#11088;</div>
+      <button class="btn" @click="rewardOpen = false" x-ref="rewardBtn">Back to World</button>
+    </div>
+  </div>
+
+  <!-- SAVE / MOVE PROGRESS (anonymous code, no PII) -->
+  <div class="reward" :class="{ show: codeOpen }" x-cloak @click.self="codeOpen = false"
+       role="dialog" aria-modal="true" aria-label="Save your progress"
+       @keydown.escape.window="codeOpen = false"
+       x-effect="codeOpen && $nextTick(() => $refs.codeFirst && $refs.codeFirst.focus())">
+    <div class="reward-card">
+      <h2>Save your stars</h2>
+      <p>Take your progress to another device with a secret code. No name, no email, nothing about you. Your stars are always saved on this device too.</p>
+
+      <button class="btn small" @click="saveToCloud()" :disabled="codeBusy" x-ref="codeFirst">Get my code</button>
+      <template x-if="myCode">
+        <div>
+          <div class="code-block" x-text="myCode" role="status" aria-live="polite"></div>
+          <div class="code-hint">Write this code down. Type it on another device to bring your stars along. It works for about 90 days.</div>
+        </div>
+      </template>
+
+      <div class="code-divider"></div>
+
+      <p>Have a code? Type it here:</p>
+      <input class="code-input" x-model="codeInput" maxlength="9" placeholder="ABCD2345" aria-label="Enter a progress code"
+             @keydown.enter="restoreFromCloud()" :disabled="codeBusy">
+      <button class="btn small" @click="restoreFromCloud()" :disabled="codeBusy">Bring my stars here</button>
+
+      <div class="code-msg" :class="codeMsgKind" x-text="codeMsg" role="status" aria-live="polite"></div>
+
+      <button class="btn ghost small" @click="codeOpen = false">Close</button>
+    </div>
+  </div>
+
+  <!-- ASK WEBO FAB -->
+  <button class="ask-fab" @click="openChat()" x-show="!overlayOpen && !chatOpen" x-cloak>
+    <span class="fab-webo" x-html="weboSvg"></span> Ask Webo
+  </button>
+
+  <!-- CHAT -->
+  <div class="chat" :class="{ show: chatOpen }" x-cloak
+       role="dialog" aria-modal="true" aria-label="Chat with Webo"
+       @keydown.escape.window="chatOpen = false">
+    <div class="chat-head">
+      <span class="mini-webo" x-html="weboSvg" aria-hidden="true"></span>
+      <div>
+        <div class="ch-name">Webo</div>
+        <div class="ch-sub">&#9679; your money buddy</div>
+      </div>
+      <button class="close-x" @click="chatOpen = false" aria-label="Close chat">&#10005;</button>
+    </div>
+    <div class="chat-log" x-ref="chatLog" role="log" aria-live="polite" aria-label="Conversation with Webo">
+      <template x-for="(m, i) in messages" :key="i">
+        <div class="msg" :class="m.who" x-html="m.html"></div>
+      </template>
+      <div class="msg bot typing" x-show="chatBusy" aria-hidden="true"><span></span><span></span><span></span></div>
+    </div>
+    <div class="chat-suggest" x-show="!hasAsked()">
+      <template x-for="s in suggestions" :key="s">
+        <button @click="sendChat(s)" x-text="s"></button>
+      </template>
+    </div>
+    <div class="chat-input">
+      <input x-model="chatInput" @keydown.enter="sendChat()" aria-label="Ask Webo anything about money"
+             placeholder="Ask Webo anything about money..." autocomplete="off" :disabled="chatBusy">
+      <button @click="sendChat()" :disabled="chatBusy" aria-label="Send">&#10148;</button>
+    </div>
+  </div>
+
+</div>
+
+</body>
+</html>

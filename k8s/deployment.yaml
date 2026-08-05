@@ -37,26 +37,33 @@ spec:
           env:
             - name: BUILD_ID
               value: "{{.Values.buildId}}"
-          # Readiness gates traffic; liveness gates restarts. They are deliberately
-          # different endpoints: a pod that is briefly busy should be pulled from
-          # the Service, not killed.
+            # Server-side Anthropic key for /api/ask, sourced from the Harness
+            # secret manager. optional: true means a missing secret degrades the
+            # feature rather than blocking the pod from starting — the app
+            # already returns a friendly warming-up response without it.
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{.Values.secretName}}
+                  key: ANTHROPIC_API_KEY
+                  optional: true
+          # Readiness gates traffic; liveness gates restarts. Deliberately
+          # different endpoints, and both answer before any application logic so
+          # a fault in the app cannot make a healthy pod look unschedulable.
           readinessProbe:
             httpGet:
-              path: /actuator/health/readiness
+              path: /healthz/ready
               port: http
-            initialDelaySeconds: 10
+            initialDelaySeconds: 3
             periodSeconds: 5
             failureThreshold: 6
           livenessProbe:
             httpGet:
-              path: /actuator/health/liveness
+              path: /healthz
               port: http
-            initialDelaySeconds: 30
+            initialDelaySeconds: 10
             periodSeconds: 15
             failureThreshold: 3
-          # Requests are what the scheduler packs against. Without them the pods
-          # would compete with the Harness delegate on a two-node cluster and
-          # could sit Pending.
           resources:
             requests:
               cpu: {{.Values.cpuRequest}}
@@ -70,9 +77,8 @@ spec:
             capabilities:
               drop: ["ALL"]
           volumeMounts:
-            # readOnlyRootFilesystem is on, but the JVM still needs a writable
-            # temp dir. An emptyDir keeps it writable without unlocking the
-            # whole filesystem.
+            # readOnlyRootFilesystem is on; Node still wants a writable temp dir.
+            # An emptyDir keeps it writable without unlocking the filesystem.
             - name: tmp
               mountPath: /tmp
       volumes:

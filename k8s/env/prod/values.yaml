@@ -1,20 +1,20 @@
 # prod environment overrides.
 #
 # Attached in Harness as an Environment-level Service Override, layered over
-# k8s/values.yaml. The point of this file is that promoting to prod changes
-# real configuration rather than merely changing a namespace — otherwise the
-# two environments are the same deployment twice and prove nothing.
+# k8s/values.yaml. The point of this file is that promoting to prod changes real
+# configuration rather than merely changing a namespace — otherwise the two
+# environments are the same deployment twice and prove nothing.
 
 environment: prod
 
-# Three replicas so that a canary rollout has a meaningful stable set to sit
-# alongside: Harness brings up canary pods next to these, and both are visible
-# in `kubectl get pods -n prod` during the pause.
+# Three replicas so a canary rollout has a meaningful stable set to sit beside:
+# Harness brings canary pods up next to these, and both are visible in
+# `kubectl get pods -n prod` during the pause.
 replicas: 3
 
 # Prod gets more headroom than dev. This is the concrete evidence that
-# environment overrides work — dev pods and prod pods carry different resource
-# specs from the same manifest.
-cpuRequest: 200m
-memoryRequest: 512Mi
+# environment overrides work — dev and prod pods carry different resource specs
+# rendered from the same manifest.
+cpuRequest: 500m
+memoryRequest: 1Gi
 memoryLimit: 1Gi

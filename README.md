@@ -1,10 +1,34 @@
 # Harness Implementation Engineering Lab
 
-An end-to-end CI/CD implementation on [Harness](https://harness.io): source is built by
-**Harness CI** on hosted runners, published to a public registry, and promoted by
-**Harness CD** through an in-cluster delegate into **GKE Autopilot** — dev on a rolling
-deploy, prod on a canary behind an approval gate, with the whole pipeline assembled from
-**reusable templates**.
+**I containerized a game I built for Vercel and redeployed it to GKE — rebuilding Vercel's
+multi-stage deploy explicitly with Harness CI/CD, and templatizing it so the pipeline is
+reusable rather than bespoke.**
+
+The application is [Webo's Money World](https://github.com/wealthbot-io/webo-money-world),
+a kids' financial-literacy game: a static frontend plus two Vercel serverless functions.
+It runs on Vercel today. This repo runs the same source on Kubernetes.
+
+That reframing is the interesting part. Vercel gives you a great deal *implicitly* — a CDN,
+security headers from `vercel.json`, preview-to-production promotion, zero-downtime
+rollouts, instant rollback. None of it survives the move to Kubernetes. Rebuilding it makes
+every one of those an **explicit, inspectable piece of pipeline**:
+
+| Vercel gives you implicitly | Rebuilt here as |
+|---|---|
+| Build on push | Harness CI on hosted runners |
+| Immutable deployment per commit | Image tagged `<+pipeline.sequenceId>` |
+| Preview → Production promotion | `dev` → approval gate → `prod` |
+| Zero-downtime rollout | Rolling in dev, **canary** in prod |
+| Headers from `vercel.json` | Reapplied in the container server |
+| Instant rollback | Redeploy the previous immutable tag |
+| Env vars in the dashboard | Harness secret manager → Kubernetes Secret |
+
+Knowing what a platform does *for* you — and being able to rebuild it when a customer
+cannot use that platform — is the job. The templates are what stop it from being a
+one-off.
+
+The handlers in `api/` are **not modified**: the same source still runs on Vercel. Only the
+thing invoking them changed.
 
 > **Status:** in progress. [`docs/LAB-NOTES.md`](docs/LAB-NOTES.md) is the build log — what
 > was done, what broke, and how each failure was diagnosed.
