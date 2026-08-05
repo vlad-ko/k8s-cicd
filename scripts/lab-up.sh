@@ -14,9 +14,7 @@ log "Resuming cluster ${CLUSTER}"
 # Egress first — see note above.
 ensure_nat
 
-log "Scaling ${NODE_POOL} to ${NODE_COUNT} nodes"
-$GC container clusters resize "$CLUSTER" --zone="$ZONE" \
-  --node-pool="$NODE_POOL" --num-nodes="$NODE_COUNT" --quiet
+resize_pool "$NODE_COUNT"
 
 authorize_current_ip
 

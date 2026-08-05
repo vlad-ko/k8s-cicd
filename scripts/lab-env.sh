@@ -56,6 +56,37 @@ remove_nat() {
   ok "Cloud NAT removed"
 }
 
+# Resize the node pool and wait for the operation to actually finish.
+#
+# `gcloud container clusters resize` blocks on a client-side wait that gives up
+# well before GKE does, then exits non-zero while the operation is still RUNNING
+# server-side. Under `set -e` that aborts the rest of the script even though
+# nothing is wrong — which is exactly how the first real lab-up.sh run left the
+# kubeconfig unrefreshed and the control-plane allow-list unset.
+#
+# So: dispatch asynchronously, then poll the operation ourselves. The operation
+# status is the source of truth, not the client's patience.
+resize_pool() {
+  local count="$1" op
+  log "Scaling ${NODE_POOL} to ${count} nodes"
+  op=$($GC container clusters resize "$CLUSTER" --zone="$ZONE" \
+         --node-pool="$NODE_POOL" --num-nodes="$count" --quiet --async \
+         --format='value(name)')
+  if [ -z "$op" ]; then
+    warn "Could not dispatch resize operation"; return 1
+  fi
+  printf '    waiting on %s' "$op"
+  local status
+  while :; do
+    status=$($GC container operations describe "$op" --zone="$ZONE" --format='value(status)' 2>/dev/null || true)
+    case "$status" in
+      DONE) printf '\n'; ok "Node pool at ${count}"; return 0 ;;
+      ABORTING|""|ABORTED) printf '\n'; warn "Resize operation ended as: ${status:-unknown}"; return 1 ;;
+      *) printf '.'; sleep 15 ;;
+    esac
+  done
+}
+
 # The control plane allow-list is pinned to a single residential IP, which changes.
 # Re-authorizing on every start-up avoids a confusing "kubectl times out" session.
 # Note curl -4: this network returns an IPv6 address by default, and GKE's

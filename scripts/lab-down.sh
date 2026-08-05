@@ -22,9 +22,8 @@ if kubectl get svc harness-lab-app -n dev >/dev/null 2>&1; then
   kubectl delete svc harness-lab-app -n dev --wait=false >/dev/null 2>&1 || true
 fi
 
-log "Scaling ${NODE_POOL} to 0 nodes (deletes node VMs and their boot disks)"
-$GC container clusters resize "$CLUSTER" --zone="$ZONE" \
-  --node-pool="$NODE_POOL" --num-nodes=0 --quiet
+# Deletes the node VMs and their boot disks — the bulk of the hourly cost.
+resize_pool 0
 
 remove_nat
 
