@@ -2,10 +2,17 @@
 #
 # Park the lab between sessions.
 #
-# On Autopilot there are no nodes to scale down directly — you scale the
-# *workloads* to zero and Autopilot reclaims the nodes underneath. Removing the
+# On Autopilot there are no node pools to scale — you scale the *workloads* to
+# zero, which drives your billable pod requests to zero. Removing the
 # LoadBalancer Service and the Cloud NAT gateway takes out the two remaining
 # hourly charges that persist with no pods running.
+#
+# What this does NOT do, despite appearances: empty the cluster of nodes.
+# Autopilot keeps nodes alive to run kube-system, so `kubectl get nodes` still
+# shows capacity after parking. Under Autopilot's pod-request billing those
+# system nodes are Google's cost, not yours — the thing that actually falls to
+# zero is what YOUR pods request. Verified: parking with no workloads deployed
+# left two nodes Ready.
 #
 # The cluster object survives, so namespaces, the installed delegate, and every
 # Harness-side connector and pipeline stay valid; ./lab-up.sh restores it.
