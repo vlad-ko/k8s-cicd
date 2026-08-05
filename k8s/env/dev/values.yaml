@@ -1,0 +1,12 @@
+# dev environment overrides.
+#
+# Attached in Harness as an Environment-level Service Override, layered over
+# k8s/values.yaml. Only the keys that genuinely differ from base appear here —
+# a copy of every key would drift from base silently, which is exactly the
+# duplication the override mechanism exists to prevent.
+
+environment: dev
+
+# Two replicas: enough to show the Service load-balancing across pods and to
+# make a rolling update observable, without crowding a two-node cluster.
+replicas: 2

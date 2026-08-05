@@ -36,7 +36,9 @@ Two consequences that govern how work happens here:
 
 ---
 
-## 2. The five exercises (scope — do not silently expand)
+## 2. Scope
+
+### The five required exercises
 
 | # | Exercise | Definition of done |
 |---|---|---|
@@ -46,9 +48,52 @@ Two consequences that govern how work happens here:
 | 4 | Harness CD | Same pipeline, added deploy stage; app serving traffic from the cluster |
 | 5 | Bonus — templates | A step template published and *referenced* by the pipeline |
 
-Exercise 5 is in scope. Anything beyond these five (GitOps, policy-as-code, multi-env
-promotion, IaC modules) is **out of scope** — mention it in the notes' "what I'd do in
-production" section rather than building it.
+### Framing: this is a customer reference implementation, not a checkbox run
+
+The brief calls templatization "one of the biggest value propositions of Harness." For an
+implementation-engineering role, reusability **is** the product story — so the submission
+is built as a **customer-like reproduction of a production environment**, not the minimum
+that satisfies exercise 5. The bar is "would this stand up as a reference implementation
+in front of a customer?"
+
+That deliberately expands scope beyond the literal five. The expansion is the point.
+
+### The template hierarchy (the core deliverable)
+
+Three tiers, because each demonstrates reuse at a different altitude:
+
+| Tier | Template | Reuse demonstrated |
+|---|---|---|
+| **Step** | `Maven Build & Test`; `Build & Push Image` | Runtime inputs for goals / repo / tag |
+| **Stage** | `Deploy to Kubernetes` | Referenced **twice** — dev and prod — with environment and strategy as inputs |
+| **Pipeline** | `Java Service CI/CD` | Onboarding a second service becomes "reference + supply inputs" |
+
+The headline claim to be able to make and defend: **adding a third environment is a
+~90-second template reference**, not a copy-pasted stage.
+
+### Production-shaped delivery
+
+- **dev → manual approval → prod**, one Service across two Environments
+- **Rolling in dev, Canary in prod** — the contrast is the demo
+- **Environment-level `values.yaml` overrides** — replicas, resources, namespace
+- **Auto-rollback** failure strategies on deploy stages
+- **Webhook trigger** on push to `main`
+- Secrets in the Harness secret manager, never inline
+
+### Pipeline-as-code (Git Experience)
+
+Pipelines, templates, services, and environments are stored as YAML under `.harness/` in
+this repo and synced bidirectionally. Two reasons: it is the real customer pattern (pipeline
+changes get PR review), and it makes the Harness work **reviewable in the repo** rather than
+invisible behind a login.
+
+### Still out of scope
+
+Cluster provisioning does **not** belong in the delivery pipeline. Real organizations split
+it — a platform team owns cluster Terraform, application teams own delivery — and that
+separation also avoids the chicken-and-egg where a Terraform step destroys the cluster
+hosting the delegate executing it. Cluster lifecycle is handled by `scripts/` for now;
+Harness IaCM is the productized version and gets named in the write-up, not built.
 
 ---
 
@@ -96,7 +141,9 @@ its contents in committed files, and do not remove it from `.gitignore`.
 | CD infra | **Delegate** in-cluster | CD must reach the cluster's API server; only the delegate can |
 | Registry | **Public** Docker Hub repo | The brief requires a public registry; public avoids an imagePullSecret |
 | Service type | **LoadBalancer** | GKE issues a real external IP, so verification is a real URL, not a port-forward |
-| Deploy strategy | **Rolling** | Simplest correct default; canary is a "would do in production" note |
+| Deploy strategy | **Rolling** in dev, **Canary** in prod | The contrast is the demo; canary is Harness's differentiated capability |
+| Environments | **dev → approval → prod** | Proves promotion and stage-template reuse without doubling cluster load |
+| Config storage | **Git Experience** (`.harness/`) | Pipeline changes get PR review; the work is visible in the repo |
 
 **Why CI needs no delegate but CD does** is a core concept this lab probes — CI runs on
 Harness-hosted infrastructure, while CD must reach a private API server from outside.
@@ -111,7 +158,15 @@ Keep that distinction straight in code and in prose.
 ├── CLAUDE.md              # this file
 ├── README.md              # public-facing overview
 ├── app/                   # Spring Boot app + Dockerfile (one versioned endpoint)
-├── k8s/                   # deployment.yaml, service.yaml, values.yaml
+├── k8s/
+│   ├── deployment.yaml    # Go-templated manifests
+│   ├── service.yaml
+│   ├── values.yaml        # base values
+│   └── env/
+│       ├── dev/values.yaml    # environment overrides — replicas, resources
+│       └── prod/values.yaml
+├── .harness/              # pipeline-as-code: pipelines, templates, services, envs
+├── scripts/               # cluster park/resume lifecycle
 ├── docs/
 │   ├── LAB-NOTES.md       # ← the graded write-up
 │   ├── LAB-PLAN.md        # gitignored, private
@@ -146,10 +201,15 @@ output. Each gate is also a screenshot for the notes.
 | G2 delegate | `kubectl get pods -n harness-delegate-ng` + Harness UI | `Running` **and** Connected |
 | G3 connectors | Each connector's **Test Connection** | green, all three |
 | G4 CI | Pipeline run + registry listing | green **and** tag present |
-| G5 CD | `kubectl get pods -n dev` | `Running`, correct image tag |
+| G5 CD dev | `kubectl get pods -n dev` | `Running`, correct image tag |
 | G6 reachable | `kubectl get svc -n dev` then `curl http://<EXTERNAL-IP>` | expected version string |
 | G7 loop | Bump version → push → re-run → re-curl | new version served |
-| G8 template | Pipeline shows the linked-template indicator | referenced, not inlined |
+| G8 templates | Pipeline shows linked-template indicators at all three tiers | referenced, not inlined |
+| G9 promotion | Pipeline pauses at the approval step; prod deploys only after approval | gate actually blocks |
+| G10 canary | During prod deploy, canary and stable pods coexist | `kubectl get pods -n prod` shows both |
+| G11 overrides | dev and prod differ per their env values files | replica counts differ as configured |
+| G12 as-code | `.harness/` YAML in the repo matches what the console shows | bidirectional sync working |
+| G13 rollback | Force a failed deploy | Harness rolls back automatically; prior version still serving |
 
 **Never claim a gate passed without having run it.** If a gate is red, stop — do not
 proceed to the next phase.

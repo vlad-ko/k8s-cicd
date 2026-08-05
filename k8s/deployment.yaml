@@ -4,6 +4,7 @@ metadata:
   name: {{.Values.name}}
   labels:
     app: {{.Values.name}}
+    env: {{.Values.environment}}
 spec:
   replicas: {{.Values.replicas}}
   selector:
@@ -21,6 +22,10 @@ spec:
     metadata:
       labels:
         app: {{.Values.name}}
+        # Not part of the selector — Harness adds its own canary/stable tracking
+        # labels, and widening the selector would fight with them. This is here
+        # purely so `kubectl get pods -L env` makes the promotion visible.
+        env: {{.Values.environment}}
     spec:
       containers:
         - name: {{.Values.name}}
@@ -54,10 +59,10 @@ spec:
           # could sit Pending.
           resources:
             requests:
-              cpu: 100m
-              memory: 384Mi
+              cpu: {{.Values.cpuRequest}}
+              memory: {{.Values.memoryRequest}}
             limits:
-              memory: 768Mi
+              memory: {{.Values.memoryLimit}}
           securityContext:
             runAsNonRoot: true
             allowPrivilegeEscalation: false
