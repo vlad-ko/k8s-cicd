@@ -3,6 +3,10 @@
 The lab brief asks for "screenshots, notes, and any relevant links in a separate document
 for later review." This is that document.
 
+**What this lab actually does:** it takes a game I built and deployed to Vercel, containerizes
+it, and redeploys it to GKE — rebuilding Vercel's multi-stage deploy explicitly with Harness
+CI/CD, and templatizing it so the pipeline is reusable rather than bespoke.
+
 It is written **as the work happens**, not reconstructed afterwards. Where something
 broke, the symptom, the hypothesis, the check, and the fix are all recorded — the brief
 states outright that diagnosing "why things don't quite work as expected" is the point of
@@ -16,7 +20,7 @@ the exercise, so failures are treated as findings rather than as noise.
 | # | Exercise | Status |
 |---|---|---|
 | 1 | Kubernetes cluster set up | ✅ |
-| 2 | Harness trial & delegate install | 🟡 |
+| 2 | Harness trial & delegate install | ✅ |
 | 3 | Harness CI | ⬜ |
 | 4 | Harness CD | ⬜ |
 | 5 | Bonus — templates | ⬜ |
@@ -30,13 +34,94 @@ the exercise, so failures are treated as findings rather than as noise.
 | Host OS | macOS (Darwin 25.4.0) |
 | kubectl | v1.34.1 |
 | Docker | 29.4.0 (Docker Desktop) |
-| Cluster | GKE Standard, zonal (`us-central1-a`), 2 × `e2-standard-2` |
-| Cluster networking | **Private nodes** + Cloud NAT for egress; public control plane endpoint restricted by authorized networks (see Findings 1 and 3) |
+| Cluster | **GKE Autopilot**, regional (`us-central1`) — adopted after repeated zone capacity stockouts on Standard (Finding 7) |
+| Cluster networking | **Private nodes** + regional Cloud NAT for egress; control plane not restricted by authorized networks |
 | Kubernetes version | v1.35.6-gke.1250000 |
 | Registry | Docker Hub, public repository |
 | Build infra | Harness Cloud (hosted) |
-| Deploy target | `dev` namespace, in-cluster Harness Delegate |
-| App | Spring Boot 3.3.5 on Java 21, built with Maven |
+| Deploy target | `dev` and `prod` namespaces, via an in-cluster Harness Delegate |
+| Delegate | `webo-moneyworld`, Helm chart, version 26.07.89703 |
+| App | [Webo's Money World](https://github.com/wealthbot-io/webo-money-world) — static frontend + two Vercel serverless functions, containerized on Node 22 |
+
+---
+
+## The application — from Vercel to Kubernetes
+
+**Goal.** Replace the throwaway sample the tutorial suggests with a real application, and in
+doing so make the exercise about *portability* rather than about following a guide.
+
+The app is [Webo's Money World](https://github.com/wealthbot-io/webo-money-world), a kids'
+financial-literacy game: a static Alpine.js frontend with no build step, plus two Vercel
+serverless functions (`api/ask.js`, `api/progress.js`) and security headers declared in
+`vercel.json`. It runs on Vercel today. This lab runs the same source on Kubernetes.
+
+The brief says "Java (or other language of choice)", so nothing here conflicts with it. The
+original plan used Java and Maven purely because the linked quickstart does; that argument
+was weak, and swapping before any pipeline existed cost only a Dockerfile.
+
+### Why this framing is the interesting part
+
+Vercel provides a great deal **implicitly**. None of it survives the move to Kubernetes, and
+rebuilding each piece turns an invisible platform guarantee into an explicit, inspectable
+stage:
+
+| Vercel gives you implicitly | Rebuilt here as |
+|---|---|
+| Build on push | Harness CI on hosted runners |
+| Immutable deployment per commit | Image tagged `<+pipeline.sequenceId>` |
+| Preview → Production promotion | `dev` → approval gate → `prod` |
+| Zero-downtime rollout | Rolling in dev, canary in prod |
+| Headers from `vercel.json` | Reapplied in the container server |
+| Instant rollback | Redeploy the previous immutable tag |
+| Env vars in the dashboard | Harness secret manager → Kubernetes Secret |
+
+Knowing what a platform does *for* you, and being able to rebuild it when a customer cannot
+use that platform, is the job. The templates are what stop it from being a one-off.
+
+### The constraint that makes the claim real
+
+**`api/ask.js` and `api/progress.js` are not modified.** The same source still runs on
+Vercel; only the thing invoking them changed. Editing the handlers to suit Kubernetes would
+have made the portability claim circular — of course it runs, it was rewritten to.
+
+So `server.js` reconstructs the three things Vercel's platform supplied:
+
+1. **Static file serving**, over an explicit allowlist
+2. **The handler surface** — Vercel's Node runtime injects `req.body`, `req.query`,
+   `res.status()` and `res.json()`; Node's `http` provides none of them
+3. **The `vercel.json` headers**, reapplied on every response
+
+All **40 of the app's own tests pass unmodified**.
+
+### Choices worth defending
+
+**An allowlist, not a document root.** The app root also contains `api/`, server-side `lib/`,
+`test/` and `.env.example`. Serving the directory with a path-traversal guard would still
+happily serve `lib/kv.js`. Enumerating what is public is the safer default — `lib/` is mixed,
+with `lesson-kit.mjs` a browser module and `kv.js`/`util.js` server-side, and only the former
+is exposed.
+
+**`/api/version` is a test affordance, not a feature.** It returns `version` (from
+`package.json`), `build` (the Harness pipeline run) and `instance` (the pod name). Those three
+fields are what make "did the redeploy actually work?" and "are canary and stable pods both
+serving?" answerable by screenshot rather than by assertion. Gates G7 and G10 depend on them.
+
+**Health endpoints answer before security headers and application logic**, so a fault in the
+app cannot make a healthy pod look unhealthy and trigger a restart loop.
+
+**`ANTHROPIC_API_KEY` uses `optional: true`.** A missing secret degrades Ask Webo to its
+warming-up response rather than blocking the pod from starting. It also gives the lab a real
+secret to flow through the Harness secret manager into a Kubernetes Secret — a capability
+nothing else here exercises.
+
+**Resource requests state Autopilot's real minimums.** Autopilot silently rounds smaller
+requests up, so asking for `100m` CPU and seeing `250m` on the running pod reads as
+configuration drift. Naming the actual floor keeps the manifest honest.
+
+**Verified before any pipeline work:** 40/40 tests, image builds for `linux/amd64` (237 MB),
+container healthy, `BUILD_ID` surfaced through to `/api/version`, runs as uid 1000, SIGTERM
+drains, all five `vercel.json` headers present, server-side files return 404, path traversal
+blocked.
 
 ---
 
@@ -377,23 +462,103 @@ nodes in.
 
 **Goal.** A delegate running in-cluster and connected to the Harness control plane.
 
-**Approach & rationale.**
-<!-- Delegate install method chosen (YAML vs Helm) and why. What the manifest creates:
-     namespace, ServiceAccount, ClusterRoleBinding — and why the K8s connector later
-     depends on that ServiceAccount. -->
+**Approach & rationale.** Installed via the **Helm chart** rather than the raw Kubernetes
+manifest. Helm was already required for the lab, upgrades become `helm upgrade` instead of
+re-applying YAML, and the release is cleanly removable — closer to how a customer would
+actually run it. The delegate was named `webo-moneyworld`; that name is what delegate
+*selectors* reference later when scoping a connector or a pipeline stage.
 
-**Gate G2 — delegate pod + Harness UI status**
+**What the chart creates.** A `Deployment` (not a StatefulSet — the delegate has shipped as
+each across versions, which is why the lifecycle scripts scale both kinds), plus an hourly
+`CronJob` that self-upgrades the delegate. The upgrader is worth knowing about: it is a
+standing background workload, and a customer wanting a pinned delegate version would need
+to disable it.
+
+**Gate G2 — delegate pod and health** ✅
 ```
-<!-- kubectl get pods -n harness-delegate-ng -->
+$ kubectl get pods -n harness-delegate-ng
+NAME                               READY   STATUS    RESTARTS   AGE
+webo-moneyworld-857df956bb-5lnpf   1/1     Running   0          116s
+
+$ kubectl exec -n harness-delegate-ng <pod> -- curl -s -o /dev/null -w "%{http_code}" \
+    http://localhost:3460/api/health
+200
 ```
 
-**Screenshot:** `screenshots/02-delegate-connected.png` *(crop the account ID out of the URL bar)*
+Ready after ~45 seconds, **zero restarts**.
 
-**What broke / what I learned.**
-<!-- Prime candidates: pod Pending on insufficient resources; installs but never connects
-     (egress); CrashLoopBackOff on a bad token. Record the diagnosis path, not just the fix. -->
+### Reading the startup errors correctly
+
+For the first ~45 seconds the logs were full of stack traces:
+
+```
+Caused by: io.harness.health.HealthException: Delegate is not healthy. Heartbeat has expired.
+... "GET /api/health HTTP/1.1" 500 110 "-" "kube-probe/1.35"
+```
+
+**This is the readiness probe working, not a failure.** The delegate serves `/api/health` as
+500 until it completes its first handshake with Harness, so Kubernetes correctly holds the
+pod at `0/1` and keeps it out of service until it can actually do work. A delegate that
+reported `Ready` immediately would be the suspicious outcome. The signal to wait for is the
+transition to 200 — which is also the cluster-side confirmation of "Connected" in the UI,
+obtainable without opening the console.
+
+### Autopilot resource mutation, confirmed
+
+The install emitted:
+
+```
+Warning: autopilot-default-resources-mutator: Autopilot updated CronJob
+harness-delegate-ng/webo-moneyworld-upgrader-job: defaulted unspecified 'cpu'
+resource for containers [upgrader]
+```
+
+This is the behaviour predicted when the cluster moved to Autopilot, now observed on a real
+workload: Autopilot rewrites unspecified or under-minimum resource requests. Application
+pods will therefore report requests larger than `k8s/values.yaml` declares. That is expected
+and not configuration drift — which is why the base values file now states Autopilot's real
+minimums explicitly rather than smaller numbers that would be silently rewritten.
+
+### Finding 8 — Cloud NAT is not effective the moment it is created
+
+Bringing the cluster back before installing, `lab-up.sh` created Cloud NAT and immediately
+reported success. An egress check run seconds later failed:
+
+```
+app.harness.io HTTP 000 in 5.05s      # no response at all, not a rejection
+```
+
+Retried a minute later, from the same cluster with no configuration change:
+
+```
+--- DNS ---      Address: 35.201.91.229
+--- TCP/TLS ---  harness  HTTP 401 connect=0.039s
+--- generic ---  google   HTTP 200
+```
+
+Cloud NAT takes a minute or two to become effective after creation. `HTTP 000` versus an
+HTTP status is the distinguishing signal — no response at all means no path, whereas a 401
+means the path is fine.
+
+The consequence is a trap: `lab-up.sh` declares "Lab resumed" as soon as NAT is *created*,
+so a delegate started immediately afterwards would fail its initial registration with an
+error that looks like a Harness problem. Follow-up: `lab-up.sh` should verify egress rather
+than assume it, on the same principle as every other gate in this document — assert the
+observable behaviour, not the API call's return value.
+
+**Confirmed in the Harness UI:** delegate `webo-moneyworld`, connectivity **Connected**,
+version 26.07.89703, last heartbeat 26 seconds ago. Both the parent delegate entry and its
+pod instance report Connected.
+
+Worth noting the console shows *Auto Upgrade: DETECTING* — the upgrader CronJob had not yet
+run its first hourly pass. A customer who wants a pinned delegate version would disable that
+job rather than leave it self-updating.
+
+**Screenshot:** `screenshots/02-delegate-connected.png` *(crop the account ID from the URL bar and the signed-in email from the header)*
 
 **References.**
+- Delegate install: https://developer.harness.io/docs/platform/delegates/install-delegates/overview/
+- Autopilot resource defaults: https://cloud.google.com/kubernetes-engine/docs/concepts/autopilot-resource-requests
 
 ---
 
@@ -617,6 +782,70 @@ from the same external IP.
 **What broke / what I learned.**
 
 **References.**
+
+---
+
+## Cross-cutting Finding 9 — four verifications that lied
+
+Individually these are small. Together they are the most useful thing this lab produced, so
+they are collected rather than left scattered.
+
+**Four times, a check reported the wrong answer** — three false passes and one false failure —
+and in every case the check failed for a reason unrelated to what it was checking.
+
+| # | The check | What actually happened |
+|---|---|---|
+| 1 | `docker push -q … \| tail -3` | The pipe returned **`tail`'s** exit status, so a failed push looked successful and `set -e` never fired. Printed a green checkmark over a push that never happened. |
+| 2 | `${PIPESTATUS[0]}` guard, rewritten to fix #1 | `PIPESTATUS` is a **bash** array. This shell is **zsh**, where it is `pipestatus`. It expanded empty, the guard compared against an empty string, and success was reported again. |
+| 3 | `curl localhost:8080` against a new server | **Docker Desktop already held port 8080.** The server died with `EADDRINUSE` and every response — including the "blocked" 404s that appeared to prove the static allowlist worked — came from Docker's listener. A completely clean-looking pass that tested nothing. |
+| 4 | `replicas_for` after a bug fix | Sourced the script from **zsh**, where `BASH_SOURCE` does not exist, so the path base fell back to the cwd and every lookup missed. Reported `1, 1, 1` and looked like the fix had failed. It had not. |
+
+Finding 6 is the same class in the opposite direction: `gcloud container clusters resize`
+exits non-zero while the operation succeeds server-side.
+
+### What actually catches these
+
+**Assert on the artifact, not the exit code.** `$?` describes the *command's* experience, not
+the world. The registry check only became trustworthy when it stopped reading exit codes and
+started fetching the manifest with an anonymous token — the same path a cluster node takes.
+`HTTP 200` on a real manifest cannot be faked by a shell quirk.
+
+**Negative-test the check itself.** `scripts/validate-manifests.sh` is trustworthy *because*
+a typo was deliberately induced to confirm it fails. The push checks had never been observed
+failing, and it showed. A check that has only ever passed is an untested branch.
+
+**Verify the precondition before the assertion.** Incident 3 was caught only because the 404
+body had a trailing period the real server does not emit. The fix was to assert *"is this my
+server?"* before asking it anything — the rerun greps the startup log for the expected
+`listening on` line and aborts if absent.
+
+**Know which shell is running.** Two of the four were zsh/bash differences. Scripts carry a
+bash shebang and behave correctly when executed; the errors came from ad-hoc verification run
+in the ambient shell.
+
+The general principle: **a check that cannot fail is worse than no check**, because it
+manufactures confidence. This is doubly true in a CI/CD context, where the entire product is
+automated verification — a green pipeline that verifies nothing is precisely the failure mode
+a customer will not notice until production.
+
+---
+
+## Working practice
+
+Work is tracked in GitHub issues with acceptance criteria; `main` is protected by a ruleset
+requiring pull requests, with no force-push and no branch deletion, and admin bypass so the
+solo author is never locked out. Each change lands as `issue → branch → PR (closes #N) →
+merge`.
+
+The first thirteen commits went directly to `main` before this was set up. That was a process
+gap; it is recorded rather than quietly rewritten.
+
+The repository is public, which was a deliberate decision taken **after** a full-history scan:
+every blob across every commit, all commit messages, and author identity were checked for
+account identifiers, billing IDs, tokens, endpoints and personal email. Author email is a
+GitHub noreply address throughout. Private working material (`docs/LAB-PLAN.md`) and local
+config (`scripts/lab.env`) are gitignored, and screenshots are cropped — the Harness console
+shows the account name in its breadcrumb and the signed-in email in its header.
 
 ---
 
