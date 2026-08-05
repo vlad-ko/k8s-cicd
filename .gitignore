@@ -1,0 +1,45 @@
+# ---------------------------------------------------------------------------
+# Private planning material — NOT part of the submission.
+# LAB-PLAN.md is working material for the author's own review and contains
+# environment identifiers. Never commit it.
+# ---------------------------------------------------------------------------
+docs/LAB-PLAN.md
+
+# ---------------------------------------------------------------------------
+# Secrets & credentials — nothing in this repo is ever authoritative for these.
+# All real values live in the Harness secret manager or a local env file.
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*-key.json
+*credentials*.json
+kubeconfig
+kubeconfig-*
+.kube/
+
+# Harness delegate manifest — generated per-account, embeds an account ID and
+# a delegate token. Regenerate from the Harness UI rather than committing it.
+harness-delegate*.yaml
+delegate.yaml
+
+# ---------------------------------------------------------------------------
+# Build output
+# ---------------------------------------------------------------------------
+target/
+build/
+*.class
+*.jar
+!.mvn/wrapper/maven-wrapper.jar
+
+# ---------------------------------------------------------------------------
+# OS / editor
+# ---------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+*.iml
+.vscode/
+*.swp
