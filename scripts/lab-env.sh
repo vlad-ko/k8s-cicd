@@ -117,6 +117,16 @@ scale_ns() {
 # Replica counts live in the environment values files, so resume restores what
 # the deployment actually asks for rather than a number duplicated in this script.
 replicas_for() {
-  local env="$1" f="${_here}/../k8s/env/${env}/values.yaml"
-  [ -f "$f" ] && sed 's/#.*//' "$f" | awk '/^replicas:/{print $2; exit}' || echo 1
+  # Declared on separate lines deliberately. `local a="$1" b="${a}"` marks both
+  # names local before assigning either, so the second expansion sees an unset
+  # variable and `set -u` aborts the script — which is exactly how the first real
+  # lab-up.sh run failed to restore replica counts, silently, while reporting
+  # success everywhere else.
+  local envname="$1"
+  local f="${_here}/../k8s/env/${envname}/values.yaml"
+  local n=""
+  [ -f "$f" ] && n="$(sed 's/#.*//' "$f" | awk '/^replicas:/{print $2; exit}')"
+  # Fall back to 1 rather than emitting nothing: an empty value would make the
+  # caller run `kubectl scale --replicas=` and fail obscurely.
+  printf '%s' "${n:-1}"
 }
