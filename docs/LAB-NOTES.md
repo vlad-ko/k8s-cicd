@@ -910,6 +910,48 @@ the filename means `v2` lands beside `v1` rather than overwriting it**, so templ
 becomes visible and diffable in git. The single most compelling part of the templates story
 would otherwise have been invisible in the repository.
 
+### Finding 13 — "Enforce git experience" does not cover every entity type
+
+With enforcement enabled, Inline is greyed out when creating templates, services and
+environments — Remote is the only choice. That worked: seven Harness-authored commits landed
+three templates, the service and both environments in the repository.
+
+**Infrastructure definitions are the exception, and the exception is silent.** Opening one
+shows the *inverse*: **Inline selected, Remote greyed out**. They cannot be stored in Git at
+all, whatever the enforcement setting claims.
+
+```
+$ git ls-tree -r --name-only origin/main -- .harness
+  envs/pre_production/dev.yaml
+  envs/production/prod.yaml
+  services/webo_money_world.yaml
+  templates/build_and_push_image/v1.yaml
+  templates/build_and_test/v1.yaml
+  templates/deploy_to_kubernetes/v1.yaml
+        # no infrastructure definitions — though they exist in Harness
+```
+
+**Why this matters beyond tidiness.** The setting is named "Enforce git experience", it
+visibly enforced Remote everywhere else, and then made an undocumented exception. Anyone
+would reasonably conclude their configuration is fully in version control. It is not:
+
+- **A restore from the repository comes back incomplete.** Templates, service and
+  environments return; the infrastructure definitions binding them to a cluster and namespace
+  do not — discovered mid-incident, which is the worst possible time.
+- **Part of the delivery config escapes review.** Namespace and cluster connector are exactly
+  the fields worth seeing in a pull request before a change reaches production, and they are
+  the ones absent from it.
+- **The failure is silent.** No warning, no badge, nothing in the setup flow. It is visible
+  only by listing the repository and noticing an *absence*, and absences are hard to notice.
+
+Impact here is small: two objects, thirteen lines each. The lesson is not.
+
+**What I would tell a customer.** Do not assume enforcement implies completeness — verify
+what actually lands in the repository, per entity type, before relying on it for disaster
+recovery or review coverage. Same principle as Finding 9: assert against the observable
+artifact, not against the setting that claims to produce it. A configuration toggle states
+intent; the file listing is evidence.
+
 ### Finding 12 — Git Experience adds a second committer, and it borrows a human identity
 
 The commit Harness created was authored as:
