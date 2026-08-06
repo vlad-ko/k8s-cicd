@@ -1,0 +1,14 @@
+inputSet:
+  name: main branch
+  identifier: main_branch
+  orgIdentifier: default
+  projectIdentifier: default_project
+  pipeline:
+    identifier: webo_cicd
+    properties:
+      ci:
+        codebase:
+          build:
+            type: branch
+            spec:
+              branch: main
