@@ -5,14 +5,11 @@ metadata:
   labels:
     app: {{.Values.name}}
 spec:
-  # LoadBalancer, so GKE provisions a real external IP and the deployment can be
-  # verified with an ordinary HTTP request instead of a port-forward. The
-  # resulting URL is the evidence for the CD exercise.
-  #
-  # Note this is unaffected by the org's compute.vmExternalIpAccess DENY policy:
-  # that constraint governs external IPs on VM instances, not load balancer
-  # forwarding rules. The nodes stay private; the load balancer is still public.
-  type: LoadBalancer
+  # ClusterIP, not LoadBalancer. The nginx Ingress terminates TLS and routes by
+  # hostname, so each environment no longer needs its own L4 load balancer —
+  # one ingress IP serves both, which is cheaper and gives real hostnames
+  # instead of bare IPs.
+  type: ClusterIP
   selector:
     app: {{.Values.name}}
   ports:

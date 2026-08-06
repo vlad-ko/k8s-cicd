@@ -15,7 +15,7 @@
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-MANIFESTS="k8s/deployment.yaml k8s/service.yaml"
+MANIFESTS="k8s/deployment.yaml k8s/service.yaml k8s/ingress.yaml"
 BASE="k8s/values.yaml"
 fail=0
 
