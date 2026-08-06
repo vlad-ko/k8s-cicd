@@ -21,9 +21,9 @@ the exercise, so failures are treated as findings rather than as noise.
 |---|---|---|
 | 1 | Kubernetes cluster set up | ✅ |
 | 2 | Harness trial & delegate install | ✅ |
-| 3 | Harness CI | ⬜ |
-| 4 | Harness CD | ⬜ |
-| 5 | Bonus — templates | ⬜ |
+| 3 | Harness CI | ✅ |
+| 4 | Harness CD | ✅ |
+| 5 | Bonus — templates | ✅ |
 
 ---
 
@@ -1286,6 +1286,54 @@ without touching production. That is a platform constraint, not a preference.
 
 ---
 
+## Git Experience — a cross-cutting constraint, not a storage setting
+
+Five separate frictions surfaced from one decision, and they share a shape worth being able
+to articulate.
+
+**Going in, Git Experience looks like a storage choice**: where do my pipelines live,
+Harness's database or my repo? In practice it is a **constraint that propagates across the
+platform**, and its edges are discovered at use time rather than at configuration time.
+
+| # | What happened | What it means |
+|---|---|---|
+| 1 | Infrastructure definitions cannot be *created* as Remote — only imported or moved afterwards | Enforcement does not imply completeness |
+| 2 | Triggers reject inline `inputYaml`; inputs must come from a repo-stored Input Set | Runtime inputs become reviewable artifacts |
+| 3 | Manual runs must *select* an Input Set rather than typing a value | Convenience of the rare path is spent on rigour of the common one |
+| 4 | The Input Set YAML editor allowed Save with no file path, then failed on push | Uneven coverage across entity types |
+| 5 | Triggers themselves are not stored in Git at all | The "everything as code" claim needs qualifying |
+
+**None of these is a defect.** Points 2 and 3 in particular are Harness being principled: if a
+deployment's inputs are not in version control, a pipeline execution cannot be reproduced or
+reviewed, and "it ran with different inputs last time" becomes unanswerable. Forcing inputs
+into the repo is the correct trade.
+
+**But the trade is real and nobody announces it.** Enabling Git Experience quietly changes
+how triggers are configured, how manual runs are launched, and which entity types you can
+create through the normal flow. Every one of those was discovered by hitting it mid-task,
+with an error message that explains the rule but never why it exists.
+
+### How I would frame this to a customer
+
+Not "Git Experience has rough edges" — that is both unfair and unhelpful. Rather:
+
+> Git Experience is not a place to put your YAML. It is a decision that **everything
+> influencing a deployment must be reviewable**, and the platform enforces that decision in
+> places you will not anticipate. Budget for discovering its boundaries, and expect the cost
+> to land on interactive workflows — manual runs, quick edits, one-off triggers — because
+> those are exactly the paths that bypass review.
+
+That framing predicts every friction above from a single principle, which is more useful than
+a list of gotchas — and it makes the trade explicit up front rather than discovered on day
+three.
+
+**Worth being clear about the payoff**: ten Harness entities in this repository, reviewable
+in pull requests, diffable, and restorable. A three-tier template hierarchy visible as files.
+The `webo_cicd` pipeline collapsing from 105 lines to 60 as a diff rather than an assertion.
+None of that exists without accepting the constraint.
+
+---
+
 ## Cross-cutting Finding 9 — four verifications that lied
 
 Individually these are small. Together they are the most useful thing this lab produced, so
@@ -1347,6 +1395,61 @@ account identifiers, billing IDs, tokens, endpoints and personal email. Author e
 GitHub noreply address throughout. Private working material (`docs/LAB-PLAN.md`) and local
 config (`scripts/lab.env`) are gitignored, and screenshots are cropped — the Harness console
 shows the account name in its breadcrumb and the signed-in email in its header.
+
+---
+
+## Exercise 5 — the template hierarchy, completed
+
+Four templates, three tiers, all consumed:
+
+```
+templates/build_and_test/v1.yaml         step     — command, image, connector as inputs
+templates/build_and_push_image/v1.yaml   step     — connector, repo, dockerfile, context
+templates/deploy_to_kubernetes/v1.yaml   stage    — referenced TWICE (dev, prod)
+templates/service_cicd/v1.yaml           pipeline — 12 runtime inputs
+pipelines/webo_cicd.yaml                 60 lines of pure input
+```
+
+**The pipeline collapsed from 105 lines to 60**, and everything remaining is a repo name, a
+test command, a base image, an image path, or a service reference. Nothing about *how* to
+deploy.
+
+### What is input and what is policy
+
+The pipeline template's design is the argument. Consumers supply what to build and where to
+push it. They cannot supply:
+
+| Fixed | Consequence |
+|---|---|
+| `dev → approve → prod` | No service skips dev or reaches prod unapproved |
+| The approval stage itself | Cannot be removed by a consumer |
+| `tags: [<+pipeline.sequenceId>]` | `latest` is unreachable |
+| `failureStrategies: StageRollback` | Every deploy has rollback, thought about or not |
+| Build infrastructure | Every build runs in the same place |
+
+That is the difference between *having a template* and *having a platform*. The promotion path
+is policy expressed as a template rather than a wiki page nobody reads — and a team cannot
+opt out without authoring a different template, which is a visible act rather than a quiet
+omission.
+
+### Two claims proven rather than asserted
+
+**Templates are app-agnostic.** The pipeline was designed around a Java/Maven service and now
+builds a Node application. That swap cost template *inputs* and zero template edits. Nothing
+in any template names a language, build tool, or image.
+
+**The migration is behaviour-preserving.** `webo_cicd` was converted from a standalone
+105-line pipeline to a template reference, re-run, and produced an identical deployment. That
+matters more than it sounds: **no customer rewrites working pipelines to adopt templating.**
+The path has to be "point the existing pipeline at a template and confirm nothing changed",
+and that path works.
+
+### The claim about a third environment
+
+Adding `staging` would require: an Environment, an Infrastructure Definition, a values file,
+and one stage reference in the pipeline template. No new service, no new templates, no
+changes to any existing template. The estimate of roughly ninety seconds is defensible —
+though honestly, most of that would be waiting for the environment YAML to sync.
 
 ---
 
