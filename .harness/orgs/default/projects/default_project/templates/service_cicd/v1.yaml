@@ -1,0 +1,111 @@
+template:
+  name: service cicd
+  identifier: service_cicd
+  versionLabel: v1
+  type: Pipeline
+  projectIdentifier: default_project
+  orgIdentifier: default
+  tags: {}
+  description: |
+    Standard delivery pipeline for a containerised service. Build and test, publish
+    an immutably tagged image, deploy to dev, gate on approval, deploy to prod.
+    Per-service variation is exposed as runtime inputs; the promotion path and its
+    approval gate are fixed and cannot be opted out of.
+  spec:
+    properties:
+      ci:
+        codebase:
+          connectorRef: <+input>
+          repoName: <+input>
+          build: <+input>
+    stages:
+      - stage:
+          name: build
+          identifier: build
+          type: CI
+          spec:
+            cloneCodebase: true
+            infrastructure:
+              type: KubernetesDirect
+              spec:
+                connectorRef: gkeautopilot
+                namespace: harness-build
+                automountServiceAccountToken: true
+                os: Linux
+            execution:
+              steps:
+                - step:
+                    name: build and test
+                    identifier: build_and_test
+                    template:
+                      templateRef: build_and_test
+                      versionLabel: v1
+                      templateInputs:
+                        type: Run
+                        spec:
+                          connectorRef: <+input>
+                          image: <+input>
+                          command: <+input>
+                - step:
+                    name: build and push
+                    identifier: build_and_push
+                    template:
+                      templateRef: build_and_push_image
+                      versionLabel: v1
+                      templateInputs:
+                        type: BuildAndPushDockerRegistry
+                        spec:
+                          connectorRef: <+input>
+                          repo: <+input>
+                          dockerfile: <+input>
+                          context: <+input>
+      - stage:
+          name: deploy dev
+          identifier: deploy_dev
+          template:
+            templateRef: deploy_to_kubernetes
+            versionLabel: v1
+            templateInputs:
+              type: Deployment
+              spec:
+                service:
+                  serviceRef: <+input>
+                environment:
+                  environmentRef: dev
+                  infrastructureDefinitions:
+                    - identifier: dev_k8s
+      - stage:
+          name: approve prod
+          identifier: approve_prod
+          type: Approval
+          spec:
+            execution:
+              steps:
+                - step:
+                    name: approve
+                    identifier: approve
+                    type: HarnessApproval
+                    timeout: 1d
+                    spec:
+                      approvalMessage: Deploy to prod?
+                      includePipelineExecutionHistory: true
+                      approvers:
+                        userGroups:
+                          - _project_all_users
+                        minimumCount: 1
+                        disallowPipelineExecutor: false
+      - stage:
+          name: deploy prod
+          identifier: deploy_prod
+          template:
+            templateRef: deploy_to_kubernetes
+            versionLabel: v1
+            templateInputs:
+              type: Deployment
+              spec:
+                service:
+                  serviceRef: <+input>
+                environment:
+                  environmentRef: prod
+                  infrastructureDefinitions:
+                    - identifier: prod_k8s
