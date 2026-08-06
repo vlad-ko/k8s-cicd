@@ -8,7 +8,10 @@ template:
   tags: {}
   spec:
     type: Run
+    timeout: 15m
     spec:
+      connectorRef: <+input>
+      image: <+input>
       shell: Sh
       command: <+input>
     description: build and test
