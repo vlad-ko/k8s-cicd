@@ -1,0 +1,14 @@
+template:
+  name: build and test
+  identifier: build_and_test
+  versionLabel: v1
+  type: Step
+  projectIdentifier: default_project
+  orgIdentifier: default
+  tags: {}
+  spec:
+    type: Run
+    spec:
+      shell: Sh
+      command: <+input>
+    description: build and test
