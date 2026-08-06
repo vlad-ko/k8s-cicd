@@ -1,0 +1,13 @@
+infrastructureDefinition:
+  name: prod k8s
+  identifier: prod_k8s
+  orgIdentifier: default
+  projectIdentifier: default_project
+  environmentRef: prod
+  deploymentType: Kubernetes
+  type: KubernetesDirect
+  spec:
+    connectorRef: gkeautopilot
+    namespace: prod
+    releaseName: release-<+INFRA_KEY_SHORT_ID>
+  allowSimultaneousDeployments: false
