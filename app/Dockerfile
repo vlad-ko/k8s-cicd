@@ -21,7 +21,10 @@ COPY --chown=node:node vendor ./vendor
 COPY --chown=node:node assets ./assets
 COPY --chown=node:node index.html styles.css app.mjs ./
 
-USER node
+# Numeric uid, not the `node` username: Kubernetes runAsNonRoot cannot verify a
+# non-numeric user and refuses to start the container. Same uid, stated in the
+# form the orchestrator can check.
+USER 1000
 
 EXPOSE 8080
 ENV PORT=8080 NODE_ENV=production

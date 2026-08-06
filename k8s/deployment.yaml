@@ -72,6 +72,13 @@ spec:
               memory: {{.Values.memoryLimit}}
           securityContext:
             runAsNonRoot: true
+            # Numeric, not the `node` username. Kubernetes cannot verify a
+            # username is non-root without starting the container, so
+            # runAsNonRoot rejects a non-numeric USER outright with
+            # CreateContainerConfigError. 1000 is the uid of `node` in
+            # node:22-alpine (verified: `id` reports uid=1000(node)).
+            runAsUser: 1000
+            runAsGroup: 1000
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:
