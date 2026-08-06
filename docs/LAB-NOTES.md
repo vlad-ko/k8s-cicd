@@ -874,6 +874,125 @@ from the same external IP.
 
 ---
 
+## Git Experience — pipelines and templates as code
+
+**Goal.** Store pipelines, templates, services and environments as YAML in this repository,
+so the Harness half of the submission is reviewable in git rather than invisible behind a
+login — and so pipeline changes can be reviewed like any other change.
+
+**Set up before authoring anything.** Configured at *Project Settings → Default Settings →
+Git Experience*: default connector `github`, default repository `k8s-cicd`, **Default Store
+Type For Entities: REMOTE**, and **Enforce git experience** enabled.
+
+That last checkbox is the one that matters. Without it, Remote is merely the *default* and
+anyone can still create an Inline entity — so "everything is in Git" is a habit rather than a
+guarantee, and the one pipeline somebody created inline is the one nobody reviews. With it
+enabled, the Inline option is greyed out entirely. The difference between a **convention and
+a control**.
+
+**Gate G12 — the first remote entity landed in the repo** ✅
+
+```
+$ git log --oneline main..origin/main
+a803d3d Create template build and test
+
+$ git ls-tree -r --name-only origin/main -- .harness
+.harness/orgs/default/projects/default_project/templates/build_and_test/v1.yaml
+```
+
+Harness committed directly to `main` despite the branch ruleset requiring pull requests —
+the admin bypass applied, because the PAT belongs to the repository owner.
+
+**On the path layout.** Harness generates a hierarchical path including the version:
+`.../templates/build_and_test/v1.yaml`. My instinct was to flatten this to
+`.harness/templates/build_and_test.yaml`, which would have been a mistake: **the version in
+the filename means `v2` lands beside `v1` rather than overwriting it**, so template versioning
+becomes visible and diffable in git. The single most compelling part of the templates story
+would otherwise have been invisible in the repository.
+
+### Finding 13 — "Enforce git experience" does not cover every entity type
+
+With enforcement enabled, Inline is greyed out when creating templates, services and
+environments — Remote is the only choice. That worked: seven Harness-authored commits landed
+three templates, the service and both environments in the repository.
+
+**Infrastructure definitions are the exception, and the exception is silent.** Opening one
+shows the *inverse*: **Inline selected, Remote greyed out**. They cannot be stored in Git at
+all, whatever the enforcement setting claims.
+
+```
+$ git ls-tree -r --name-only origin/main -- .harness
+  envs/pre_production/dev.yaml
+  envs/production/prod.yaml
+  services/webo_money_world.yaml
+  templates/build_and_push_image/v1.yaml
+  templates/build_and_test/v1.yaml
+  templates/deploy_to_kubernetes/v1.yaml
+        # no infrastructure definitions — though they exist in Harness
+```
+
+**Why this matters beyond tidiness.** The setting is named "Enforce git experience", it
+visibly enforced Remote everywhere else, and then made an undocumented exception. Anyone
+would reasonably conclude their configuration is fully in version control. It is not:
+
+- **A restore from the repository comes back incomplete.** Templates, service and
+  environments return; the infrastructure definitions binding them to a cluster and namespace
+  do not — discovered mid-incident, which is the worst possible time.
+- **Part of the delivery config escapes review.** Namespace and cluster connector are exactly
+  the fields worth seeing in a pull request before a change reaches production, and they are
+  the ones absent from it.
+- **The failure is silent.** No warning, no badge, nothing in the setup flow. It is visible
+  only by listing the repository and noticing an *absence*, and absences are hard to notice.
+
+Impact here is small: two objects, thirteen lines each. The lesson is not.
+
+**What I would tell a customer.** Do not assume enforcement implies completeness — verify
+what actually lands in the repository, per entity type, before relying on it for disaster
+recovery or review coverage. Same principle as Finding 9: assert against the observable
+artifact, not against the setting that claims to produce it. A configuration toggle states
+intent; the file listing is evidence.
+
+### Finding 12 — Git Experience adds a second committer, and it borrows a human identity
+
+The commit Harness created was authored as:
+
+```
+a803d3d  vlad <PERSONAL_EMAIL_REDACTED>
+```
+
+Every other commit in the repository uses a GitHub noreply address. This one exposed a
+personal email — on a public repository, after deliberate effort to keep identifiers out of
+it.
+
+**The obvious fix does not work.** GitHub's *"Keep my email addresses private"* was **already
+enabled**. Its scope is narrower than it appears:
+
+> "...when performing **web-based Git operations** (e.g. edits and merges)"
+
+Harness performs neither. It commits through the **API** with a PAT, supplying an explicit
+author, and GitHub records what it is given. *"Block command line pushes that expose my
+email"* does not apply either — these are not command-line pushes.
+
+The address almost certainly comes from **Harness's own user record**, not GitHub's: the
+commit author name is `vlad`, which matches neither the git config (`vlad-ko`) nor the GitHub
+login, but does match the Harness account.
+
+**The general lesson, which is the useful part.** Enabling pipeline-as-code **adds a second
+writer to your repository**, and unless you deliberately give it its own identity, it borrows
+a human's. For a customer with commit-signing requirements, protected-branch audit rules, or
+a need to distinguish "a person changed this" from "the platform synced this", that is a real
+problem rather than a cosmetic one — and it is not mentioned anywhere in the setup flow.
+
+**The production answer** is to authenticate Harness as a **dedicated machine user or GitHub
+App** rather than a personal PAT. Commits are then authored by the automation, revoking its
+access does not disturb a person's account, and the audit trail stays honest.
+
+Accepted as-is for the lab: the address is already present in public commit history
+elsewhere, and force-pushing over a branch Harness is actively syncing against risks a real
+sync conflict for a cosmetic gain.
+
+---
+
 ## Cross-cutting Finding 9 — four verifications that lied
 
 Individually these are small. Together they are the most useful thing this lab produced, so
