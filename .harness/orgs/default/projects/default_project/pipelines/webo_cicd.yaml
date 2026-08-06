@@ -35,6 +35,8 @@ pipeline:
                     templateInputs:
                       type: Run
                       spec:
+                        connectorRef: dockerhub
+                        image: node:22-alpine
                         command: |-
                           cd app
                           node --test test/
