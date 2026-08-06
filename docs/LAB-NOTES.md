@@ -916,9 +916,23 @@ With enforcement enabled, Inline is greyed out when creating templates, services
 environments — Remote is the only choice. That worked: seven Harness-authored commits landed
 three templates, the service and both environments in the repository.
 
-**Infrastructure definitions are the exception, and the exception is silent.** Opening one
-shows the *inverse*: **Inline selected, Remote greyed out**. They cannot be stored in Git at
-all, whatever the enforcement setting claims.
+**Infrastructure definitions are the exception.** Opening one shows the *inverse*: **Inline
+selected, Remote greyed out**. They cannot be *created* as Remote.
+
+They can nonetheless be put in Git two other ways: **Import Infrastructure From Git** (a
+dropdown beside the create button), or **Move to Git** (a per-row action in the overflow
+menu). Both exist; neither is the create flow.
+
+So the accurate claim is narrow: **infrastructure definitions cannot be *created* as Remote,
+but an existing one can be moved to Git in two clicks.** The capability is present — only the
+creation path omits it.
+
+I got this wrong twice before arriving there. First I claimed they "cannot be stored in Git at
+all", which the Import action disproved. Then I claimed you must hand-author and import, which
+"Move to Git" disproved. Both corrections came from *looking again*, not from reasoning
+harder, and the claim narrowed each time — from "the platform is incapable" to "the default
+path is inconsistent". Worth recording as-is: the first version would have been an unfair
+thing to tell a customer, and it took two rounds of evidence to stop being unfair.
 
 ```
 $ git ls-tree -r --name-only origin/main -- .harness
@@ -928,8 +942,27 @@ $ git ls-tree -r --name-only origin/main -- .harness
   templates/build_and_push_image/v1.yaml
   templates/build_and_test/v1.yaml
   templates/deploy_to_kubernetes/v1.yaml
-        # no infrastructure definitions — though they exist in Harness
+        # no infrastructure definitions — though they existed in Harness
 ```
+
+**Closed rather than accepted.** `prod_k8s` was moved to Git with the per-row action.
+
+Its **default path was flat** — `.harness/prod_k8s.yaml` — and had to be overridden manually
+to `.harness/orgs/default/projects/default_project/infras/prod_k8s.yaml` to match the layout
+Harness itself uses for templates, services and environments. Left at the default, the
+`.harness/` directory would be neatly nested for six entity types and flat for the seventh.
+
+That is the third inconsistency in the same feature, all pointing the same way: infrastructure
+definitions were clearly added to Git Experience later than the rest, and the seams show —
+absent from the create flow, exempt from enforcement, and defaulting to a different path.
+None is severe. Together they are the reason someone can enable "enforce git experience",
+believe their configuration is fully in version control, and be wrong.
+
+The residual point stands: this only happened because the absence was noticed. Nothing warns
+that an entity type is exempt from an enforcement setting, and the way to find out is to list
+the repository and spot what is missing. **Absences are hard to see**, which is why the check
+has to be a positive assertion — "these six files exist" — rather than an assumption that
+enforcement did its job.
 
 **Why this matters beyond tidiness.** The setting is named "Enforce git experience", it
 visibly enforced Remote everywhere else, and then made an undocumented exception. Anyone

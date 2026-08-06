@@ -1,0 +1,13 @@
+infrastructureDefinition:
+  name: dev k8s
+  identifier: dev_k8s
+  orgIdentifier: default
+  projectIdentifier: default_project
+  environmentRef: dev
+  deploymentType: Kubernetes
+  type: KubernetesDirect
+  spec:
+    connectorRef: gkeautopilot
+    namespace: dev
+    releaseName: release-<+INFRA_KEY_SHORT_ID>
+  allowSimultaneousDeployments: false
