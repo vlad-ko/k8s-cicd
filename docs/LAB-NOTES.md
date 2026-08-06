@@ -1017,6 +1017,123 @@ sync conflict for a cosmetic gain.
 
 ---
 
+### Finding 14 — the local runtime was not the runtime that mattered
+
+I ran the application's tests locally, reported **40/40 passing**, and treated the app as
+verified. The pipeline then failed on the identical command:
+
+```
+cd app && node --test test/
+  Error: Cannot find module '/harness/app/test'
+```
+
+Local Node was **18.20.8**. The container is `node:22-alpine` — **22.23.2** — and Node 22
+resolves a bare directory argument as a *module path* rather than a test directory. Same
+command, same repository, different answer.
+
+The Dockerfile has said `node:22-alpine` since the application was containerized. The app was
+always going to run on 22; I validated against 18 because that is what was installed.
+
+Reproduced and fixed against the real image rather than by guessing:
+
+```
+$ docker run --rm -v "$PWD/app:/app" -w /app node:22-alpine node --test test/
+  Error: Cannot find module '/harness/app/test'          # reproduced
+
+$ docker run --rm -v "$PWD/app:/app" -w /app node:22-alpine node --test
+  # tests 40 · pass 40 · fail 0                          # fixed
+```
+
+Bare `node --test` uses the runner's own discovery and works on both versions.
+
+This is a distinct variant of Finding 9. The check was not broken and did not lie — it ran
+correctly and reported truthfully **about the wrong environment**. "Tests pass" is not a fact
+about a repository; it is a fact about a repository *on a particular runtime*, and CI runs a
+different one. The fix that generalises is not "be careful" but **run the check inside the
+image the pipeline will use**, which took one `docker run` and would have caught it before
+the first pipeline run.
+
+Worth noting where the fix landed: entirely in the **pipeline**, not the template. The
+template declares `command: <+input>` and is indifferent to the toolchain. A Maven service
+sharing that template was never affected.
+
+### Finding 15 — two correct hardening choices that are incompatible together
+
+The first deployment reached the cluster, pulled the image, and then refused to start:
+
+```
+Error: container has runAsNonRoot and image has non-numeric user (node),
+       cannot verify user is non-root
+```
+
+The Dockerfile declared `USER node`. The pod spec declared `runAsNonRoot: true`. Kubernetes
+cannot resolve a *username* to a uid without starting the container, so it cannot prove the
+user is non-root and refuses outright with `CreateContainerConfigError`.
+
+Each decision is defensible in isolation, and both were made for the same reason — don't run
+as root. They are incompatible because one states the intent in a form the orchestrator
+cannot check. The fix is not to weaken either: it is to say the same thing numerically —
+`USER 1000` in the image, `runAsUser: 1000` in the pod spec.
+
+**Nothing catches this before the cluster.** The image builds. The manifest validates. The
+deploy applies. `scripts/validate-manifests.sh` passes, because the values all resolve. The
+first signal is the kubelet declining to start the container — which is exactly what happens
+when a platform team's pod-security baseline meets an application team's Dockerfile, each
+written correctly and independently.
+
+**Diagnosing it from the logs is its own lesson.** The event stream contained dozens of lines,
+including repeated `0/3 nodes are available: 2 Insufficient memory` scheduling warnings that
+look far more alarming. Those were noise — Autopilot resolved them by adding a node. The real
+cause was one line that *repeated identically* about thirty times. The signal is not severity;
+it is **which error never changes**.
+
+### Finding 16 — the platform's own remediation hint was wrong
+
+When the deploy stage expired, Harness surfaced:
+
+> "Please Check the timeout configuration on the step to extend the duration of the step"
+
+Following it would have doubled the wait for a condition that could never become true. Nothing
+was slow. `Wait for Steady State` was correctly waiting on pods that were structurally unable
+to start, and the 10-minute timeout was the only thing preventing an indefinite hang — the
+mechanism working, not failing.
+
+A timeout expiring has two possible meanings — *too slow* or *never going to happen* — and the
+platform assumed the first. Worth remembering both for a customer: the instinct to raise a
+timeout is right about half the time, and wrong in exactly the cases where waiting longer costs
+the most.
+
+The same run also demonstrated **Gate G13 unplanned**: the stage's `failureStrategies` fired
+automatic rollback with no per-stage configuration, because that block is pinned in the stage
+template. Every consumer of that template gets rollback whether they thought about it or not,
+which is the argument for putting it there rather than leaving it to each team.
+
+### Smaller frictions from the same session
+
+**Build infrastructure changes what a template must declare.** The `build_and_test` template
+was authored for Harness Cloud, where a Run step executes directly on the host and needs no
+container image. On Kubernetes build infrastructure every step runs in a pod, so `image` is
+mandatory — and the template failed at `Initialize` with a clear message. Neither the template
+nor the pipeline validation catches this at save time. The durable fix was making `image` a
+**runtime input** rather than omitting or hard-coding it, so the same template now works on
+both infrastructures.
+
+**Harness Cloud build infrastructure requires credit-card validation**; self-hosted does not.
+The free tier is genuinely free either way, but that gate is worth knowing before recommending
+Harness Cloud to someone evaluating the product.
+
+**The local Docker runner was the wrong self-hosted choice here** — it runs builds on the
+developer's machine, which is arm64, while the cluster is amd64. That mismatch would have
+produced images that push successfully and then fail at runtime with `exec format error`,
+naming nothing useful. Kubernetes build infrastructure runs builds on the cluster's own amd64
+nodes, matching the deployment target by construction.
+
+**Revoking a registry token does not clean up the client.** After deleting the old Docker Hub
+token, the cached credential remained and broke even *anonymous* pulls of public images, with
+`authentication required - incorrect username or password`. `docker logout` fixed it. The error
+suggests a wrong password; the truth was a credential that should not have been presented at
+all.
+
 ## Cross-cutting Finding 9 — four verifications that lied
 
 Individually these are small. Together they are the most useful thing this lab produced, so
