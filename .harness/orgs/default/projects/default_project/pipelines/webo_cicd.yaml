@@ -1,0 +1,103 @@
+pipeline:
+  name: webo cicd
+  identifier: webo_cicd
+  projectIdentifier: default_project
+  orgIdentifier: default
+  tags: {}
+  properties:
+    ci:
+      codebase:
+        connectorRef: github
+        repoName: k8s-cicd
+        build: <+input>
+  stages:
+    - stage:
+        name: build
+        identifier: build
+        type: CI
+        spec:
+          cloneCodebase: true
+          infrastructure:
+            type: KubernetesDirect
+            spec:
+              connectorRef: gkeautopilot
+              namespace: harness-build
+              automountServiceAccountToken: true
+              os: Linux
+          execution:
+            steps:
+              - step:
+                  name: build and test
+                  identifier: build_and_test
+                  template:
+                    templateRef: build_and_test
+                    versionLabel: v1
+                    templateInputs:
+                      type: Run
+                      spec:
+                        command: |-
+                          cd app
+                          node --test test/
+              - step:
+                  name: build and push
+                  identifier: build_and_push
+                  template:
+                    templateRef: build_and_push_image
+                    versionLabel: v1
+                    templateInputs:
+                      type: BuildAndPushDockerRegistry
+                      spec:
+                        connectorRef: dockerhub
+                        repo: wealthbot/harness-lab-app
+                        dockerfile: app/Dockerfile
+                        context: app
+    - stage:
+        name: deploy dev
+        identifier: deploy_dev
+        template:
+          templateRef: deploy_to_kubernetes
+          versionLabel: v1
+          templateInputs:
+            type: Deployment
+            spec:
+              service:
+                serviceRef: webo_money_world
+              environment:
+                environmentRef: dev
+                infrastructureDefinitions:
+                  - identifier: dev_k8s
+    - stage:
+        name: approve prod
+        identifier: approve_prod
+        type: Approval
+        spec:
+          execution:
+            steps:
+              - step:
+                  name: approve
+                  identifier: approve
+                  type: HarnessApproval
+                  timeout: 1d
+                  spec:
+                    approvalMessage: Deploy to prod?
+                    includePipelineExecutionHistory: true
+                    approvers:
+                      userGroups:
+                        - _project_all_users
+                      minimumCount: 1
+                      disallowPipelineExecutor: false
+    - stage:
+        name: deploy prod
+        identifier: deploy_prod
+        template:
+          templateRef: deploy_to_kubernetes
+          versionLabel: v1
+          templateInputs:
+            type: Deployment
+            spec:
+              service:
+                serviceRef: webo_money_world
+              environment:
+                environmentRef: prod
+                infrastructureDefinitions:
+                  - identifier: prod_k8s
