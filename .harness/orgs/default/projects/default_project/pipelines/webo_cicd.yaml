@@ -39,7 +39,7 @@ pipeline:
                         image: node:22-alpine
                         command: |-
                           cd app
-                          node --test test/
+                          node --test
               - step:
                   name: build and push
                   identifier: build_and_push
