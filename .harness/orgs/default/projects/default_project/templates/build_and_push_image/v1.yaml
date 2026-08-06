@@ -1,0 +1,18 @@
+template:
+  name: build and push image
+  identifier: build_and_push_image
+  versionLabel: v1
+  type: Step
+  projectIdentifier: default_project
+  orgIdentifier: default
+  tags: {}
+  spec:
+    type: BuildAndPushDockerRegistry
+    timeout: 20m
+    spec:
+      connectorRef: <+input>
+      repo: <+input>
+      tags:
+        - <+pipeline.sequenceId>
+      dockerfile: <+input>
+      context: <+input>
