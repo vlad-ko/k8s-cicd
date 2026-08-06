@@ -3,3 +3,36 @@ service:
   identifier: webo_money_world
   orgIdentifier: default
   projectIdentifier: default_project
+  tags: {}
+  serviceDefinition:
+    type: Kubernetes
+    spec:
+      manifests:
+        - manifest:
+            identifier: webo_manifests
+            type: K8sManifest
+            spec:
+              store:
+                type: Github
+                spec:
+                  connectorRef: github
+                  gitFetchType: Branch
+                  repoName: k8s-cicd
+                  branch: main
+                  paths:
+                    - k8s/deployment.yaml
+                    - k8s/service.yaml
+              valuesPaths:
+                - k8s/values.yaml
+                - k8s/env/<+env.identifier>/values.yaml
+              skipResourceVersioning: false
+      artifacts:
+        primary:
+          primaryArtifactRef: dockerhub_image
+          sources:
+            - identifier: dockerhub_image
+              type: DockerRegistry
+              spec:
+                connectorRef: dockerhub
+                imagePath: wealthbot/harness-lab-app
+                tag: <+pipeline.sequenceId>
