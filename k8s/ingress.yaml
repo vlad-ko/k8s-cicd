@@ -1,0 +1,33 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{.Values.name}}
+  labels:
+    app: {{.Values.name}}
+    env: {{.Values.environment}}
+  annotations:
+    # cert-manager watches this annotation and issues a certificate for the
+    # hosts in tls[] automatically, solving the ACME challenge through this
+    # same ingress.
+    cert-manager.io/cluster-issuer: {{.Values.certIssuer}}
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - {{.Values.host}}
+      secretName: {{.Values.name}}-tls
+  rules:
+    # Hostname is templated per environment, so dev and prod are routed by the
+    # same manifest to different names — the same mechanism that already gives
+    # them different replica counts.
+    - host: {{.Values.host}}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{.Values.name}}
+                port:
+                  number: 80

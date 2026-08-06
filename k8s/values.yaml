@@ -42,3 +42,12 @@ secretName: webo-secrets
 cpuRequest: 250m
 memoryRequest: 512Mi
 memoryLimit: 512Mi
+
+# Public hostname, per environment. dev and prod resolve through CNAMEs on
+# wealthbot.io to the shared nginx ingress IP.
+host: webomoney-<+env.identifier>.wealthbot.io
+
+# Which cert-manager ClusterIssuer signs the certificate. Overridden to the
+# staging issuer in dev so experiments cannot burn Let's Encrypt's production
+# rate limit, which is per registered domain and unforgiving.
+certIssuer: letsencrypt-prod

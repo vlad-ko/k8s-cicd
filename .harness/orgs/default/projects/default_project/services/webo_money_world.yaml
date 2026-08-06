@@ -22,6 +22,7 @@ service:
                   paths:
                     - k8s/deployment.yaml
                     - k8s/service.yaml
+                    - k8s/ingress.yaml
               valuesPaths:
                 - k8s/values.yaml
                 - k8s/env/<+env.identifier>/values.yaml

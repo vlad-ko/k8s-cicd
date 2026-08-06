@@ -828,6 +828,75 @@ else.
 | Infrastructure | Kubernetes Direct → namespace `dev` |
 | Strategy | Rolling |
 
+### Execution history — four runs, and what each taught
+
+| Run | Result | Cause |
+|---|---|---|
+| 1 | FAILED at Initialize | `image is required` — the step template was authored for Harness Cloud, where a Run step needs no container image. Kubernetes build infrastructure requires one (Finding 14 area) |
+| 2 | FAILED at build and test | `Cannot find module '/harness/app/test'` — local Node 18 vs container Node 22 (Finding 14) |
+| 3 | EXPIRED after 11m52s | Pods could never start; `Wait for Steady State` waited its full timeout, then auto-rollback fired (Findings 15 and 16) |
+| 4 | **SUCCESS** — dev → approval → prod | — |
+
+Three failures with three unrelated root causes, none of which any pre-deploy check could
+have caught. That progression is the substance of this lab; the green run is just the
+terminator.
+
+**Gate G5 — pods running** ✅
+```
+$ kubectl get deploy -n dev
+NAME               READY   DESIRED   IMAGE
+webo-money-world   2       2         index.docker.io/<REGISTRY_USER>/harness-lab-app:4
+```
+Ready in roughly seventy seconds from stage start.
+
+**Gate G6 — reachable over HTTP** ✅
+```
+$ curl http://<DEV_LB_IP>/api/version
+{"application":"webo-money-world","version":"1.0.0","build":"4",
+ "instance":"webo-money-world-6ccf94977d-8rn7j"}
+```
+
+`"build":"4"` is the CI/CD seam proving itself. CI tagged the image `4` from
+`<+pipeline.sequenceId>`, the Deployment injected `BUILD_ID` from the same expression, and
+the running pod reports it. **A container in the cluster is traceable to the exact pipeline
+execution that produced it** — not by convention, but because the same expression resolved
+in both stages.
+
+**Gate G9 — the approval gate genuinely blocks** ✅
+
+The pipeline stopped at `approve prod` and stayed stopped. Not a confirmation dialog: the
+execution state is *persisted as waiting*, with a one-day timeout. Close the browser and it
+is still waiting. The log line `Sending notification to user groups for harness approval`
+shows the mechanism — approval is delegated to a named user group, not to whoever happens
+to be watching, which is what makes "only the release team may promote to production" a
+control rather than an honour system.
+
+**Gate G11 — environment overrides genuinely differ** ✅
+
+The single most useful piece of evidence in this lab:
+
+```
+dev:   replicas=2   cpu=250m   mem=512Mi   image=...harness-lab-app:4
+prod:  replicas=3   cpu=500m   mem=1Gi     image=...harness-lab-app:4
+```
+
+Different replica counts, different resource requests, **identical image**. That is:
+
+- **one** service definition, rendered twice — `<+env.identifier>` resolved to `dev` and
+  `prod` and pulled different override files, with no per-environment service objects
+- **one** stage template, referenced twice, differing only by input
+- **one artifact promoted, not rebuilt** — prod runs the exact bytes dev validated
+
+The last point is what immutable tagging buys. "What we tested" and "what we shipped" are
+the same artifact, and it is provable from the cluster rather than asserted.
+
+**Gate G13 — automatic rollback** ✅ (demonstrated unintentionally on run 3)
+
+No per-stage configuration was written for this. `failureStrategies: StageRollback` is
+pinned in the stage template, so every consumer inherits it whether or not they thought
+about rollback. That is the argument for putting it in the template rather than leaving it
+to each team to remember.
+
 **Why the delegate is required here but not in §3.**
 <!-- The API server is not addressable from Harness; the delegate is the outbound-only
      agent that closes the gap. -->
@@ -1133,6 +1202,89 @@ token, the cached credential remained and broke even *anonymous* pulls of public
 `authentication required - incorrect username or password`. `docker logout` fixed it. The error
 suggests a wrong password; the truth was a credential that should not have been presented at
 all.
+### Finding 17 — Autopilot forbids writes to `kube-system`, which breaks common tooling
+
+Adding HTTPS meant installing cert-manager. It installed cleanly — all three pods `Running`,
+zero restarts — and then every `ClusterIssuer` was rejected:
+
+```
+Internal error occurred: failed calling webhook "webhook.cert-manager.io":
+  x509: certificate signed by unknown authority
+```
+
+Healthy-looking pods made this read as a transient CA-injection delay. It was not. The
+cainjector logs had the real answer:
+
+```
+Error initially creating lease lock: leases.coordination.k8s.io is forbidden:
+  User "system:serviceaccount:cert-manager:cert-manager-cainjector" cannot create
+  resource "leases" in namespace "kube-system": GKE Warden authz
+  [denied by managed-namespaces-limitation]
+```
+
+cert-manager's cainjector defaults to taking its leader-election lease in `kube-system`.
+**Autopilot forbids all writes to `kube-system`** — it is a managed namespace. So cainjector
+never acquired leadership, never ran, never injected the CA bundle into the webhook
+configuration, and the webhook rejected everything. One flag fixes it:
+
+```
+--set global.leaderElection.namespace=cert-manager
+```
+
+CA injected within five seconds.
+
+**Two things worth carrying from this.** First, `Running` is not `working` — three healthy
+pods and the component was doing nothing at all. Second, this is the concrete cost of
+Autopilot's managed control plane: it removes a class of operational burden by removing a
+class of permission, and tooling that assumes full cluster access needs configuring. A fair
+trade, but a trade — and worth telling a customer before they meet it mid-install.
+
+### Finding 18 — a production CDN wildcard blocked the obvious DNS approach
+
+Exposing the app over HTTPS needed a hostname. The domain sits at a host with an active CDN,
+and the DNS zone editor stated:
+
+> "There is an active CDN for the selected domain, meaning that its **A and AAAA** records
+> cannot be managed."
+
+Worse, the CDN had a **wildcard** across the zone — an entirely invented hostname resolved:
+
+```
+$ dig +short nonexistent-test-xyz.<DOMAIN>
+  34.160.81.203  34.149.120.3  ...        # CDN answered, not NXDOMAIN
+```
+
+So the intended lab hostnames already resolved — to the CDN. An ACME HTTP-01 challenge would
+have been answered by the CDN rather than the cluster.
+
+**The tempting fix was wrong.** Deactivating the CDN would have repointed a live production
+site at its origin mid-afternoon to unblock a lab subdomain. Declined.
+
+**The actual fix was to read the restriction precisely.** Only **A and AAAA** records were
+CDN-managed. `CNAME` was not — visible in the zone's own records, where an existing subdomain
+was already a CNAME. And a *specific* record beats a wildcard, because a wildcard only
+matches names with no explicit record. So:
+
+```
+webomoney-dev.<DOMAIN>.  CNAME  <INGRESS_IP>.sslip.io.
+<INGRESS_IP>.sslip.io.   A      <INGRESS_IP>
+```
+
+Real hostnames on the real domain, resolving to the cluster ingress, production CDN
+untouched, no A record required. Let's Encrypt issues for the name requested rather than the
+CNAME target, so the certificate covers the real domain and the shared-domain rate limits
+that make `sslip.io` unreliable never apply.
+
+**The generalisable lesson is about reading restrictions narrowly.** "A and AAAA cannot be
+managed" is not "DNS cannot be managed", and a wildcard is not an override. The workaround
+existed *inside* the constraint; the reflex of removing the constraint would have caused a
+production incident to solve a lab problem.
+
+It also gives the organisation's own deferred DNS-migration work a concrete justification: a
+CDN wildcard that captures every subdomain means no hostname can be delegated elsewhere
+without touching production. That is a platform constraint, not a preference.
+
+---
 
 ## Cross-cutting Finding 9 — four verifications that lied
 
