@@ -1,0 +1,5 @@
+service:
+  name: webo money world
+  identifier: webo_money_world
+  orgIdentifier: default
+  projectIdentifier: default_project
