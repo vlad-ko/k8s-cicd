@@ -10,8 +10,3 @@ environment: dev
 # Two replicas: enough to show the Service load-balancing across pods and to
 # make a rolling update observable, without crowding a two-node cluster.
 replicas: 2
-
-# Staging issuer in dev: certificates are untrusted by browsers but the
-# issuance path is identical, and failed experiments cost nothing against the
-# production rate limit.
-certIssuer: letsencrypt-staging
