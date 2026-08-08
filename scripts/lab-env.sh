@@ -16,6 +16,21 @@
 # Parking is therefore "scale the workloads to zero" and the node cost follows,
 # rather than "surrender the nodes and hope the capacity is still there later" —
 # which is precisely how the Standard cluster stranded us (see Finding 7).
+#
+# ---------------------------------------------------------------------------
+# THE INVARIANT (see Finding 19)
+#
+#   lab-down.sh may only do things lab-up.sh can undo.
+#
+# The first version of these scripts broke it. lab-down.sh deleted the per-
+# environment LoadBalancer Service, which was correct when the app owned its own
+# LoadBalancer. After the ingress migration those Services became ClusterIP
+# behind a shared Ingress — and `kubectl get svc` succeeds for a ClusterIP just
+# as happily, so the delete kept firing against a resource lab-up.sh has no idea
+# how to recreate. Park then resume returned two Ingresses with no backend, 503,
+# and both scripts reporting success.
+#
+# Scaling is reversible; deleting is not. Park by scaling only.
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -37,6 +52,39 @@ NAT="${NAT:-harness-lab-nat}"
 APP_NAME="${APP_NAME:-webo-money-world}"
 APP_NAMESPACES="${APP_NAMESPACES:-dev prod}"
 DELEGATE_NS="${DELEGATE_NS:-harness-delegate-ng}"
+
+# The delegate ships a CronJob that self-upgrades it hourly. Left running against
+# a parked delegate it spawns a pod every hour forever, and on resume it can pull
+# a newer delegate image than the one Harness registered. Park suspends it.
+UPGRADER_CRONJOB="${UPGRADER_CRONJOB:-webo-moneyworld-upgrader-job}"
+
+# Namespaces holding the ingress path: the nginx controller that owns the single
+# LoadBalancer, and cert-manager which issued the Let's Encrypt certificates.
+#
+# These are deliberately NOT parked. DNS, the forwarding rule, the reserved
+# static IP and the certificates are wired to each other, and rebuilding that
+# chain costs a fresh ACME issuance against Let's Encrypt's rate limits. Parking
+# them would save roughly $0.60/day and risk the demo. Listed here so the scripts
+# can report what they left up rather than leaving it a surprise.
+PLATFORM_NAMESPACES="${PLATFORM_NAMESPACES:-ingress-nginx cert-manager}"
+
+# Used only to verify on resume that the app actually serves.
+#
+# Derived from k8s/values.yaml rather than restated here, for the same reason
+# replicas_for() reads the env values files: a second copy is a second thing to
+# drift, and drift between a script and the architecture it manages is exactly
+# what Finding 19 is about. It also keeps the domain out of this file.
+#
+#   host: webomoney-<+env.identifier>.example.com   ->   example.com
+#
+# The Harness expression is stripped FIRST. `<+env.identifier>` contains a dot,
+# so splitting on the first dot without removing it yields "identifier>.example.com".
+# Caught by testing the derivation instead of assuming it.
+APP_DOMAIN="${APP_DOMAIN:-$(
+  awk '/^host:/{gsub(/<\+[^>]*>/, "", $2); sub(/^[^.]*\./, "", $2); print $2; exit}' \
+    "${_here}/../k8s/values.yaml" 2>/dev/null
+)}"
+: "${APP_DOMAIN:?Could not derive APP_DOMAIN from k8s/values.yaml; set it in scripts/lab.env}"
 
 GC="gcloud --project=${GCP_PROJECT_ID}"
 
@@ -61,6 +109,14 @@ ensure_nat() {
   ok "Cloud NAT ready"
 }
 
+# For teardown, NOT for parking.
+#
+# Parking leaves ingress-nginx and cert-manager running, and Autopilot
+# consolidates nodes the moment the app pods go away — so those pods get
+# rescheduled onto a different node and have to re-pull their images from
+# registry.k8s.io and quay.io. With no NAT there is no route out, and they sit in
+# ImagePullBackOff until someone looks. Removing NAT saves about $1/day and buys
+# a silently broken ingress path. Park keeps it.
 remove_nat() {
   if $GC compute routers describe "$ROUTER" --region="$REGION" >/dev/null 2>&1; then
     log "Deleting Cloud Router ${ROUTER} (removes NAT gateway charges)"
@@ -129,4 +185,56 @@ replicas_for() {
   # Fall back to 1 rather than emitting nothing: an empty value would make the
   # caller run `kubectl scale --replicas=` and fail obscurely.
   printf '%s' "${n:-1}"
+}
+
+# suspend=true parks it, suspend=false resumes. An absent CronJob is not an error
+# — the delegate has shipped without one at some versions.
+set_upgrader() {
+  local suspend="$1"
+  kubectl get cronjob "$UPGRADER_CRONJOB" -n "$DELEGATE_NS" >/dev/null 2>&1 || return 0
+  kubectl patch cronjob "$UPGRADER_CRONJOB" -n "$DELEGATE_NS" \
+    -p "{\"spec\":{\"suspend\":${suspend}}}" >/dev/null 2>&1 || true
+  printf '    upgrader CronJob suspend=%s\n' "$suspend"
+}
+
+# Report what park deliberately left running, so the residual is never a surprise
+# when the bill arrives.
+report_residual() {
+  echo
+  log "Left running on purpose (the ingress path — see Finding 19):"
+  local n
+  for ns in $PLATFORM_NAMESPACES; do
+    kubectl get ns "$ns" >/dev/null 2>&1 || continue
+    n=$(kubectl get deploy -n "$ns" --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    printf '    %-14s %s deployment(s)\n' "$ns" "$n"
+  done
+  printf '    %-14s %s\n' "Cloud NAT" "egress for the above"
+  printf '    %-14s %s\n' "static IP" "reserved, still bound to the LoadBalancer"
+  echo
+  log "Residual ≈ \$1.50/day (forwarding rule, static IP, NAT, cluster fee)."
+  log "Certificates and DNS are untouched, so resume needs no re-issuance."
+}
+
+# The check lab-up.sh was missing.
+#
+# Pod readiness proves pods are running; it says nothing about whether the
+# Ingress still routes to them. That gap is precisely what let the Service-
+# deletion bug report success. This asserts what is actually being claimed: the
+# public URL serves the app over TLS.
+#
+# Returns non-zero if any host fails, so the caller can exit non-zero rather than
+# printing a cheerful summary over a broken lab.
+verify_reachable() {
+  local failed=0 host code
+  for ns in $APP_NAMESPACES; do
+    host="webomoney-${ns}.${APP_DOMAIN}"
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "https://${host}/api/version" || echo 000)"
+    if [ "$code" = "200" ]; then
+      ok "https://${host} → 200"
+    else
+      warn "https://${host} → ${code} (expected 200)"
+      failed=1
+    fi
+  done
+  return "$failed"
 }
