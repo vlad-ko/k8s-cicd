@@ -1286,6 +1286,116 @@ without touching production. That is a platform constraint, not a preference.
 
 ---
 
+### Finding 19 — the park/resume tooling decayed behind an architecture change
+
+Found while parking the lab between the build and the walkthrough — that is, by *reading* the
+script before running it, not by running it. Had it run, the evidence would have been
+destroyed rather than recorded.
+
+**The script.** `scripts/lab-down.sh` opened by releasing the LoadBalancer, which bills hourly
+and would otherwise linger with no pods behind it:
+
+```bash
+for ns in $APP_NAMESPACES; do
+  if kubectl get svc "$APP_NAME" -n "$ns" >/dev/null 2>&1; then
+    kubectl delete svc "$APP_NAME" -n "$ns" --wait=false
+  fi
+done
+```
+
+That was correct when written. Each environment owned a `LoadBalancer` Service, and deleting
+it released a real hourly charge.
+
+**What changed.** Adding HTTPS replaced the per-environment LoadBalancers with a single
+ingress-nginx controller. The app Services became `ClusterIP` behind an Ingress. One
+LoadBalancer now exists for the whole cluster, and it belongs to a namespace this script has
+never heard of.
+
+**Why the guard did not catch it.** `kubectl get svc <name>` asks whether a Service *exists*.
+It does not ask what type it is. A `ClusterIP` Service satisfies it exactly as well as a
+`LoadBalancer` did, so the delete kept firing — against the wrong object, for a reason that
+had stopped being true.
+
+**The consequence.** `lab-up.sh` restores replica counts. It has no idea how to recreate a
+Service. So park → resume would return:
+
+- two Ingresses routing to Services that no longer exist
+- HTTP 503 on both public URLs
+- `kubectl get pods` showing five healthy pods
+- **both scripts reporting success**
+
+Recovery would not have been a resume; it would have been a full Harness redeploy to re-apply
+`service.yaml`. Discovering that on the morning of a walkthrough is the bad version of this.
+
+**The verification that would have caught it did not exist.** `lab-up.sh` ended by waiting on
+pod readiness and printing `Lab resumed.` Pod readiness is a true statement about pods and a
+*claim* about the lab. Every pod would have been Ready in exactly the broken state above.
+
+#### The invariant
+
+The specific bug is a one-line fix. The reason it existed is the finding, and it generalises
+to any paired setup/teardown:
+
+> **`lab-down.sh` may only do things `lab-up.sh` can undo.**
+
+Nothing enforced that. The pair was written together and correct together, and then one half
+of the architecture moved. Scaling is reversible; deleting is not. Park now scales only.
+
+The same invariant settled two adjacent questions that had been decided by reflex:
+
+- **ingress-nginx and cert-manager stay running.** `lab-up.sh` cannot restore them, so under
+  the invariant park may not touch them. That happens to also be the right call on the merits
+  — DNS, the forwarding rule, the reserved static IP and the Let's Encrypt certificates are
+  wired to each other, and rebuilding that chain means a fresh ACME issuance against
+  rate limits. Parking them saves roughly $0.60/day and risks the demo.
+- **Cloud NAT stays up**, which reverses what the script did before. With the app pods gone,
+  Autopilot consolidates nodes immediately, so the ingress controller gets rescheduled and
+  has to re-pull from `registry.k8s.io`. No NAT, no route out, `ImagePullBackOff` — and
+  nothing watching. Roughly $1/day to not silently lose the ingress path.
+
+Both are now *stated* by the script rather than implied, along with the residual cost, so
+"what is still billing?" is answerable without reading the source.
+
+#### The check that replaced the claim
+
+`lab-up.sh` now ends by asserting the thing actually being claimed — that the public URL
+serves the app — and exits non-zero with an ordered diagnostic list if it does not:
+
+```bash
+code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "https://${host}/api/version")"
+```
+
+Per Finding 9, it was negative-tested **before** being trusted, in both directions, against
+the parked cluster:
+
+```
+# parked (deployments at 0)
+!! https://webomoney-dev.<DOMAIN>  → 503 (expected 200)
+!! https://webomoney-prod.<DOMAIN> → 503 (expected 200)
+exit=1
+
+# dev scaled back to 2 replicas
+ ✓ https://webomoney-dev.<DOMAIN>  → 200
+exit=0
+{"application":"webo-money-world","version":"1.1.0","build":"11","instance":"webo-money-world-5bdc56c44d-w5qh9"}
+```
+
+A check that has only ever returned failure is as untested as one that has only ever passed.
+This one has now been observed discriminating.
+
+**Why this is the most transferable finding in the document.** The others are things that
+broke. This is a thing that *worked, was tested, and then quietly stopped being correct
+because something else changed.* No commit touched these scripts. No test failed. The decay
+was invisible precisely because the tooling kept reporting success — and infrastructure
+tooling is disproportionately prone to this, because it runs rarely, runs unattended, and its
+output is trusted rather than read.
+
+Which is the whole argument for templates. A step template referenced by three pipelines is
+fixed once when the architecture moves. Three copy-pasted stages drift, and two of them are
+found on a Friday.
+
+---
+
 ## Git Experience — a cross-cutting constraint, not a storage setting
 
 Five separate frictions surfaced from one decision, and they share a shape worth being able
@@ -1376,6 +1486,35 @@ The general principle: **a check that cannot fail is worse than no check**, beca
 manufactures confidence. This is doubly true in a CI/CD context, where the entire product is
 automated verification — a green pipeline that verifies nothing is precisely the failure mode
 a customer will not notice until production.
+
+### A fifth, of a different kind — checks that decay
+
+Finding 19 belongs here but does not fit the table, and the difference is the point.
+
+The four above were **defective when written** — a shell quirk, a wrong array name, an
+occupied port. In principle a careful enough author catches them at the keyboard.
+
+Finding 19 was **correct when written and stopped being correct**. `lab-down.sh` deleted a
+LoadBalancer Service that genuinely was a LoadBalancer. Months later the ingress migration
+turned it into a ClusterIP behind an Ingress, and `kubectl get svc <name>` — which asks
+whether a Service exists, not what type it is — kept passing. No commit touched the script.
+No test failed. It simply became a script that destroys something its counterpart cannot
+rebuild, and went on reporting success.
+
+Care at authoring time cannot prevent that. Two things can:
+
+**State the invariant the pair depends on, in the code.** "`lab-down.sh` may only do things
+`lab-up.sh` can undo" is checkable by a human reading a diff. "Delete the LoadBalancer" is
+not, because its correctness lives in an architecture document that moved.
+
+**Assert the outcome, not the mechanism.** A check on pod readiness is coupled to today's
+topology and silently stops being meaningful when the topology changes. `curl https://<host>`
+returning 200 means the same thing before the ingress migration, after it, and after whatever
+comes next. Outcome assertions survive refactors; mechanism assertions rot with them.
+
+The CI/CD relevance is direct. Pipelines are exactly this kind of artifact: written once,
+correct at the time, run unattended for years while everything around them moves. **The
+failure mode is not a red pipeline — it is a green one that stopped meaning anything.**
 
 ---
 
