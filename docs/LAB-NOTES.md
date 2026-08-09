@@ -38,7 +38,7 @@ the exercise, so failures are treated as findings rather than as noise.
 | Cluster networking | **Private nodes** + regional Cloud NAT for egress; control plane not restricted by authorized networks |
 | Kubernetes version | v1.35.6-gke.1250000 |
 | Registry | Docker Hub, public repository |
-| Build infra | Harness Cloud (hosted) |
+| Build infra | **Self-hosted Kubernetes** (`KubernetesDirect`, namespace `harness-build`, on the same cluster) — Harness Cloud was the plan until it turned out to require credit-card validation (Finding 16) |
 | Deploy target | `dev` and `prod` namespaces, via an in-cluster Harness Delegate |
 | Delegate | `webo-moneyworld`, Helm chart, version 26.07.89703 |
 | App | [Webo's Money World](https://github.com/wealthbot-io/webo-money-world) — static frontend + two Vercel serverless functions, containerized on Node 22 |
@@ -67,12 +67,13 @@ stage:
 
 | Vercel gives you implicitly | Rebuilt here as |
 |---|---|
-| Build on push | Harness CI on hosted runners |
+| Build on push | Harness CI, triggered by a GitHub webhook on `main` |
 | Immutable deployment per commit | Image tagged `<+pipeline.sequenceId>` |
-| Preview → Production promotion | `dev` → approval gate → `prod` |
-| Zero-downtime rollout | Rolling in dev, canary in prod |
+| Preview → Production promotion | `dev` → Harness approval gate → `prod` |
+| Zero-downtime rollout | `K8sRollingDeploy` with `maxUnavailable: 0` |
+| Automatic HTTPS on a real hostname | ingress-nginx + cert-manager + Let's Encrypt |
 | Headers from `vercel.json` | Reapplied in the container server |
-| Instant rollback | Redeploy the previous immutable tag |
+| Instant rollback | `K8sRollingRollback`, automatic on stage failure |
 | Env vars in the dashboard | Harness secret manager → Kubernetes Secret |
 
 Knowing what a platform does *for* you, and being able to rebuild it when a customer cannot
@@ -103,8 +104,9 @@ is exposed.
 
 **`/api/version` is a test affordance, not a feature.** It returns `version` (from
 `package.json`), `build` (the Harness pipeline run) and `instance` (the pod name). Those three
-fields are what make "did the redeploy actually work?" and "are canary and stable pods both
-serving?" answerable by screenshot rather than by assertion. Gates G7 and G10 depend on them.
+fields are what make "did the redeploy actually work?" and "which pods are serving right now?"
+answerable by screenshot rather than by assertion. Gate G7 depends on them, and `instance` is
+what would have made canary and stable pods distinguishable had G10 been kept (descoped, #3).
 
 **Health endpoints answer before security headers and application logic**, so a fault in the
 app cannot make a healthy pod look unhealthy and trigger a restart loop.
@@ -576,13 +578,16 @@ build and deploy; it is the mechanism by which deployment happens at all.
 
 Three consequences:
 
-- **The build host is ephemeral.** Harness Cloud runners are destroyed when the build ends.
-  An image existing only on the runner's local daemon evaporates minutes later.
+- **The build host is ephemeral.** A build pod is torn down when the build ends — this is true
+  of Harness Cloud runners and of self-hosted `KubernetesDirect` pods alike. An image existing
+  only on the build host's local daemon evaporates minutes later.
 - **The cluster cannot reach the build host.** Nodes pull images themselves, on their own
   initiative. They need a durable, authenticated, network-reachable address.
 - **It is the CI/CD boundary.** CI's job ends at "produce an artifact"; CD's begins at
-  "consume an artifact." That decoupling is exactly why the two stages can run on different
-  infrastructure — CI on Harness Cloud, CD through the delegate — and still compose.
+  "consume an artifact." That decoupling is exactly why the two stages *can* run on entirely
+  different infrastructure and still compose — and it is what made switching CI from Harness
+  Cloud to self-hosted Kubernetes (Finding 16) a build-infrastructure change rather than a
+  redesign. The CD stage never knew or cared where the image was produced.
 
 This is also why images are tagged `<+pipeline.sequenceId>` rather than `latest`: an
 immutable tag means "what is running in prod" has an exact answer and rollback is simply
@@ -719,10 +724,24 @@ dev, staging and prod, "any available" means a dev-scoped delegate can be handed
 deployment. Tag-scoped selection is what keeps environments genuinely isolated.
 
 **Connectivity modes are not arbitrary.** GitHub and Docker Hub connect through the Harness
-Platform because both are publicly reachable and CI runs on Harness Cloud — routing them
-through the delegate would couple builds to the cluster being up, for no benefit. The
-Kubernetes connector has no such choice, which is the same "CI needs no delegate, CD does"
-distinction surfacing as a config option.
+Platform because both are publicly reachable; the Kubernetes connector has no such choice and
+must go through the delegate. The same delegate-or-not distinction, surfacing as a config
+option rather than as prose.
+
+**The original reason for that choice stopped being true, and the choice stayed right.** It
+was made while CI was still going to run on Harness Cloud, and the argument was that routing
+GitHub and Docker Hub through the delegate would needlessly couple builds to the cluster being
+up. Moving CI to self-hosted Kubernetes (Finding 16) coupled builds to the cluster anyway —
+that argument is now void.
+
+Platform connectivity is still correct, for a different reason: the connectors stay testable
+from the Harness UI without a healthy delegate, which is exactly the state you are in when
+diagnosing a delegate problem. A connector that can only be tested by the component you
+suspect is not much of a diagnostic.
+
+Worth flagging as a small instance of the Finding 19 pattern — a decision that outlived its
+stated rationale. It survived review only because someone re-derived it. Nothing in the config
+records *why* a connector is set to Platform, so nothing would have caught it.
 
 A clarification in the UI worth quoting, because it resolves a common confusion:
 
@@ -794,15 +813,38 @@ This is the argument for **one token per consumer**: the replacement is named
 `harness-connector`, so revoking it at teardown revokes exactly Harness's access and nothing
 else.
 
-**Pipeline — Build stage.**
-<!-- Infrastructure: Harness Cloud. Steps: Run (mvn) → Build and Push. -->
+**Pipeline — Build stage.** Infrastructure is `KubernetesDirect` on the lab's own cluster,
+namespace `harness-build`, through the `gkeautopilot` connector. Two steps, both template
+references: `build and test` (a `Run` step executing `node --test` in `node:22-alpine`) and
+`build and push image` (`BuildAndPushDockerRegistry`, tagging `<+pipeline.sequenceId>`).
 
 **On tagging.** Images are tagged `<+pipeline.sequenceId>` rather than `latest`.
 <!-- Explain the CI→CD seam: the CD stage resolves the same expression, so the two stages
      line up without brittle cross-stage step-output references. -->
 
-**Why no delegate is involved here.**
-<!-- CI runs on Harness-hosted runners; contrast with CD in §4. -->
+**Why a delegate *is* involved here — and why that was not the plan.**
+
+The heading this section originally carried was "Why no delegate is involved here," written
+against the Harness Cloud design. It is worth preserving what the intended contrast was,
+because the concept is real even though this implementation does not demonstrate it:
+
+- **Harness Cloud** — builds run on Harness-hosted runners. No delegate, nothing to operate,
+  and CI keeps working when your cluster does not.
+- **Self-hosted (`KubernetesDirect`)** — builds run as pods in your cluster, scheduled by the
+  delegate. You own the capacity, the image cache and the failure modes.
+
+CD has no equivalent choice. It must reach a Kubernetes API server that Harness cannot
+address, so it always goes through the delegate.
+
+Harness Cloud requires credit-card validation, which a trial account does not have
+(Finding 16), so CI here runs self-hosted and the delegate executes both halves of the
+pipeline. The accurate statement is therefore *"CI can be delegate-free and CD cannot"* —
+not *"CI needs no delegate"*, which is false of this repo.
+
+**The practical consequence is a coupling that was not designed in.** Parking the cluster
+stops CI as well as CD. Pushing to `main` while parked produces a run with no delegate to
+execute it, rather than a build that succeeds and waits for a deploy target. On Harness Cloud
+the CI stage would have gone green regardless.
 
 **Gate G4 — pipeline green + image in registry**
 

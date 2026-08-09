@@ -62,11 +62,15 @@ That deliberately expands scope beyond the literal five. The expansion is the po
 
 Three tiers, because each demonstrates reuse at a different altitude:
 
-| Tier | Template | Reuse demonstrated |
+| Tier | Template (`v1`) | Reuse demonstrated |
 |---|---|---|
-| **Step** | `Maven Build & Test`; `Build & Push Image` | Runtime inputs for goals / repo / tag |
-| **Stage** | `Deploy to Kubernetes` | Referenced **twice** — dev and prod — with environment and strategy as inputs |
-| **Pipeline** | `Java Service CI/CD` | Onboarding a second service becomes "reference + supply inputs" |
+| **Step** | `build and test`; `build and push image` | Runtime inputs for image / connector / command / repo / Dockerfile |
+| **Stage** | `deploy to kubernetes` | Referenced **twice** — dev and prod — with service / environment / infrastructure as inputs |
+| **Pipeline** | `service cicd` | Onboarding a second service becomes "reference + supply inputs" |
+
+Identifiers are lowercase-with-underscores (`build_and_test`, `deploy_to_kubernetes`,
+`service_cicd`); display names are the lowercase phrases above. Use the real names — earlier
+drafts of this file invented title-case ones that never existed in the account.
 
 The headline claim to be able to make and defend: **adding a third environment is a
 ~90-second template reference**, not a copy-pasted stage.
@@ -74,10 +78,12 @@ The headline claim to be able to make and defend: **adding a third environment i
 ### Production-shaped delivery
 
 - **dev → manual approval → prod**, one Service across two Environments
-- **Rolling in dev, Canary in prod** — the contrast is the demo
+- **Rolling in both environments** — canary was descoped in #3 once the delivery path was
+  complete; it would have shown a step type, not a missing capability
 - **Environment-level `values.yaml` overrides** — replicas, resources, namespace
 - **Auto-rollback** failure strategies on deploy stages
-- **Webhook trigger** on push to `main`
+- **Webhook trigger** on push to `main`, with a repo-stored Input Set
+- **HTTPS on real hostnames** — ingress-nginx + cert-manager + Let's Encrypt
 - Secrets in the Harness secret manager, never inline
 
 ### Pipeline-as-code (Git Experience)
@@ -133,21 +139,36 @@ its contents in committed files, and do not remove it from `.gitignore`.
 
 ## 4. Stack decisions (settled — don't relitigate)
 
+This table records **what shipped**, not what was planned. Five rows changed under a
+constraint discovered mid-build; where that happened the original is named, because the
+reason for the change is usually the more useful thing to be able to explain.
+
 | Area | Choice | Rationale |
 |---|---|---|
-| Cluster | **GKE**, Standard, zonal, public | `gcloud` already available; a *private* cluster has no egress, so the delegate installs cleanly and then never connects |
-| App | **Java + Maven** (Spring Boot) | Matches the quickstart the brief links, so it matches grader expectations |
-| CI infra | **Harness Cloud** (hosted runners) | The brief points at it explicitly; no delegate needed for CI |
-| CD infra | **Delegate** in-cluster | CD must reach the cluster's API server; only the delegate can |
+| Cluster | **GKE Autopilot**, regional, **private nodes** + Cloud NAT | *Was: Standard, zonal, public.* Standard hit repeated zone capacity stockouts (Finding 7); an inherited org policy denies external IPs on VMs, so private nodes + NAT was the only path to delegate egress (Finding 1) |
+| App | **Node 22** — a real Vercel app, containerized | *Was: Java + Maven, to match the linked quickstart.* Redeploying an app that already ships on Vercel makes the platform-rebuild story concrete instead of generic |
+| CI infra | **Self-hosted `KubernetesDirect`**, namespace `harness-build` | *Was: Harness Cloud.* Harness Cloud requires credit-card validation, which a trial lacks (Finding 16). Consequence: CI depends on the delegate here, and `Run` steps need an explicit `image` (Finding 14) |
+| CD infra | **Delegate** in-cluster | CD must reach the cluster's API server; only the delegate can. Unchanged |
 | Registry | **Public** Docker Hub repo | The brief requires a public registry; public avoids an imagePullSecret |
-| Service type | **LoadBalancer** | GKE issues a real external IP, so verification is a real URL, not a port-forward |
-| Deploy strategy | **Rolling** in dev, **Canary** in prod | The contrast is the demo; canary is Harness's differentiated capability |
+| Ingress | **ingress-nginx + cert-manager**, one LoadBalancer, Let's Encrypt | *Was: LoadBalancer Service per environment.* Real HTTPS on real hostnames needs a shared ingress; per-env LoadBalancers cannot share a certificate issuer or an IP |
+| Deploy strategy | **Rolling** in both environments | *Was: Rolling in dev, Canary in prod.* Descoped in #3 — the delivery path was already complete, and canary would have demonstrated a step type rather than a missing capability. The stage template makes it a one-template edit |
 | Environments | **dev → approval → prod** | Proves promotion and stage-template reuse without doubling cluster load |
 | Config storage | **Git Experience** (`.harness/`) | Pipeline changes get PR review; the work is visible in the repo |
 
-**Why CI needs no delegate but CD does** is a core concept this lab probes — CI runs on
-Harness-hosted infrastructure, while CD must reach a private API server from outside.
-Keep that distinction straight in code and in prose.
+**The delegate distinction is still a core concept this lab probes — state it accurately.**
+Harness CI offers two build infrastructures: *Harness Cloud* (hosted runners, no delegate) and
+*self-hosted* (`KubernetesDirect`, build pods scheduled by the delegate in your cluster). CD
+has no equivalent choice; it must reach a private API server from outside, so it always needs
+the delegate.
+
+**This implementation uses self-hosted CI**, so the delegate executes both. Do not write "CI
+needs no delegate" about *this* repo — it is true of Harness Cloud and false here. The
+accurate framing is that CI *can* be delegate-free and CD cannot, and that a trial's billing
+gate is what pushed this build onto the self-hosted path.
+
+**When a decision in this table changes, update the table in the same PR.** README, this file
+and `docs/LAB-NOTES.md` all restate the architecture; drift between them is what issue #25
+existed to fix, and Finding 19 is the general case.
 
 ---
 
@@ -157,16 +178,17 @@ Keep that distinction straight in code and in prose.
 .
 ├── CLAUDE.md              # this file
 ├── README.md              # public-facing overview
-├── app/                   # Spring Boot app + Dockerfile (one versioned endpoint)
+├── app/                   # Vercel app + server.js (Node 22 runtime shim) + Dockerfile
 ├── k8s/
 │   ├── deployment.yaml    # Go-templated manifests
-│   ├── service.yaml
+│   ├── service.yaml       # ClusterIP — the one LoadBalancer belongs to ingress-nginx
+│   ├── ingress.yaml       # host + TLS, cert-manager annotations
 │   ├── values.yaml        # base values
 │   └── env/
 │       ├── dev/values.yaml    # environment overrides — replicas, resources
 │       └── prod/values.yaml
-├── .harness/              # pipeline-as-code: pipelines, templates, services, envs
-├── scripts/               # cluster park/resume lifecycle
+├── .harness/              # pipeline-as-code: pipeline, templates, service, envs, infras, input set
+├── scripts/               # cluster park/resume lifecycle, manifest validation
 ├── docs/
 │   ├── LAB-NOTES.md       # ← the graded write-up
 │   ├── LAB-PLAN.md        # gitignored, private
@@ -202,14 +224,15 @@ output. Each gate is also a screenshot for the notes.
 | G3 connectors | Each connector's **Test Connection** | green, all three |
 | G4 CI | Pipeline run + registry listing | green **and** tag present |
 | G5 CD dev | `kubectl get pods -n dev` | `Running`, correct image tag |
-| G6 reachable | `kubectl get svc -n dev` then `curl http://<EXTERNAL-IP>` | expected version string |
+| G6 reachable | `curl https://webomoney-dev.<DOMAIN>/api/version` | HTTP 200, expected version string, **trusted** certificate |
 | G7 loop | Bump version → push → re-run → re-curl | new version served |
 | G8 templates | Pipeline shows linked-template indicators at all three tiers | referenced, not inlined |
 | G9 promotion | Pipeline pauses at the approval step; prod deploys only after approval | gate actually blocks |
-| G10 canary | During prod deploy, canary and stable pods coexist | `kubectl get pods -n prod` shows both |
+| ~~G10 canary~~ | *Descoped in #3* — both environments deploy rolling | n/a |
 | G11 overrides | dev and prod differ per their env values files | replica counts differ as configured |
 | G12 as-code | `.harness/` YAML in the repo matches what the console shows | bidirectional sync working |
 | G13 rollback | Force a failed deploy | Harness rolls back automatically; prior version still serving |
+| G14 resume | `./scripts/lab-up.sh` after a park | exits 0 **and** both public URLs return 200 |
 
 **Never claim a gate passed without having run it.** If a gate is red, stop — do not
 proceed to the next phase.
