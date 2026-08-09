@@ -23,6 +23,7 @@ refresh_kubeconfig
 
 log "Restoring the delegate"
 scale_ns "$DELEGATE_NS" 1
+set_upgrader false
 
 log "Restoring application workloads"
 for ns in $APP_NAMESPACES; do
@@ -47,4 +48,27 @@ done
 
 echo
 warn "Allow a minute or two for the delegate to re-register as CONNECTED in Harness."
-ok "Lab resumed."
+
+# The gate. Everything above proves pods exist; only this proves the lab works.
+#
+# Pods can be Ready while the Ingress routes nowhere — that is exactly the state
+# the old lab-down.sh left behind, and the old lab-up.sh called it success. So
+# resume is not "resumed" until the public URL answers.
+echo
+log "Verifying the public endpoints actually serve"
+for attempt in 1 2 3 4 5 6; do
+  if verify_reachable; then
+    echo
+    ok "Lab resumed and serving."
+    exit 0
+  fi
+  [ "$attempt" -lt 6 ] && { log "Retrying in 20s (pods may still be scheduling)…"; sleep 20; }
+done
+
+echo
+warn "Pods were restored but the public endpoints did not come back."
+warn "Check, in this order:"
+warn "  kubectl get svc,ingress -n dev        # Services present? Ingress has an ADDRESS?"
+warn "  kubectl get pods -n ingress-nginx     # controller running, image pulled?"
+warn "  kubectl get certificate -A            # TLS still Ready?"
+exit 1

@@ -3,9 +3,12 @@
 # Park the lab between sessions.
 #
 # On Autopilot there are no node pools to scale — you scale the *workloads* to
-# zero, which drives your billable pod requests to zero. Removing the
-# LoadBalancer Service and the Cloud NAT gateway takes out the two remaining
-# hourly charges that persist with no pods running.
+# zero, which drives your billable pod requests to zero.
+#
+# Park scales; it never deletes. See the invariant in lab-env.sh: an earlier
+# version of this script deleted the per-environment Service, which lab-up.sh has
+# no way to recreate, and resume came back to an Ingress with no backend while
+# both scripts reported success (Finding 19).
 #
 # What this does NOT do, despite appearances: empty the cluster of nodes.
 # Autopilot keeps nodes alive to run kube-system, so `kubectl get nodes` still
@@ -28,26 +31,26 @@ log "Parking cluster ${CLUSTER}"
 
 refresh_kubeconfig
 
-# Released first: a LoadBalancer forwarding rule bills hourly and would otherwise
-# linger with no pods behind it.
-for ns in $APP_NAMESPACES; do
-  if kubectl get svc "$APP_NAME" -n "$ns" >/dev/null 2>&1; then
-    log "Removing LoadBalancer Service in ${ns}"
-    kubectl delete svc "$APP_NAME" -n "$ns" --wait=false >/dev/null 2>&1 || true
-  fi
-done
-
 log "Scaling workloads to zero (drives billable pod requests to zero)"
 for ns in $APP_NAMESPACES; do scale_ns "$ns" 0; done
 scale_ns "$DELEGATE_NS" 0
 
-remove_nat
+# Otherwise it spawns a pod every hour against a delegate that is not there.
+log "Suspending the delegate upgrader"
+set_upgrader true
+
+# Cloud NAT deliberately stays up — see remove_nat() in lab-env.sh for why.
 
 echo
 ok "Lab parked."
 warn "The Harness delegate will report DISCONNECTED while scaled to zero."
-warn "This is expected — ./lab-up.sh brings it back."
+warn "Both app URLs will return 503 until ./lab-up.sh restores the pods."
+warn "This is expected."
+
+report_residual
+
 echo
-log "Still billing (small): the Autopilot cluster fee, if not covered by the GKE free tier."
-log "To stop all charges permanently:"
+log "To stop all charges permanently (teardown, not parking — see issue #8):"
 log "  gcloud container clusters delete ${CLUSTER} --location=${LOCATION}"
+log "  gcloud compute routers delete ${ROUTER} --region=${REGION}"
+log "  gcloud compute addresses delete webo-ingress-ip --region=${REGION}"
