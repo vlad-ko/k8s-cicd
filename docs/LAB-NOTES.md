@@ -1684,10 +1684,34 @@ than a human deciding the canary looks fine.
 
 ## 7. Teardown
 
-Cloud resources deleted after evidence capture; tokens issued for the lab revoked.
+Torn down 2026-08-18, after the walkthrough. All billable cloud resources deleted; a sweep
+of clusters, instances, addresses, forwarding rules, disks, routers, target pools and
+firewall rules returned zero of each.
 
-| Resource | Deleted |
-|---|---|
-| Kubernetes cluster | ⬜ |
-| Registry access token | ⬜ |
-| GitHub PAT | ⬜ |
+| Resource | Deleted | Note |
+|---|---|---|
+| GKE cluster `harness-lab-auto` | ✅ | Took the delegate, ingress-nginx, cert-manager and both app namespaces with it |
+| Cloud Router + NAT | ✅ | The egress path from Finding 1 |
+| Reserved static IP | ✅ | The single address both Ingresses shared |
+| Registry access token | ⬜ | Manual, outside GCP |
+| GitHub PAT | ⬜ | Manual, outside GCP |
+| Harness delegate token | ⬜ | Manual. Worth rotating regardless — it was visible on screen during the walkthrough |
+
+**Two deliverables were closed unfinished, and it is worth being explicit about which.**
+
+*Screenshots (issue #7) were never captured.* `docs/screenshots/` holds only a `.gitkeep`.
+The evidence in this document is command output and YAML, both of which are reproducible from
+the repository; the console-side evidence — delegate Connected, the pipeline showing linked
+templates, the approval gate paused — is not, and is now unrecoverable. The brief asked for
+screenshots explicitly, so this is a real gap rather than a descope, and the honest reason is
+that the walkthrough was treated as the deliverable and the artefacts were not captured
+alongside it.
+
+*The Autopilot billing question (issue #6) was never settled.* §1 records the claim that
+parking drives billable pod requests to zero while Google's system nodes stay up at no charge
+to the account. That was reasoned from Autopilot's documented pricing model, not confirmed
+against a bill, and no budget alert was ever configured. The residual was estimated at
+~$1.50/day. Nothing in this document should be read as a verified cost figure.
+
+Both are recorded here rather than quietly dropped, on the same principle as the rest of the
+findings: an absence nobody names is indistinguishable from an absence nobody noticed.
